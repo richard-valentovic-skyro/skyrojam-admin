@@ -10,16 +10,22 @@
    The balance is the number the canteen keeps on the account, exactly as on
    the student's own credit page: it is read from the record and never
    re-summed from the ledger rows below it. A top-up moves it once, on an
-   explicit click, and the amount is cleared in the same breath — so a second
-   press of an already-spent sum does nothing.
+   explicit click, and the amount is cleared the moment the server confirms
+   the charge — so a second press of an already-spent sum does nothing.
 
-   The clock is read only inside credit(), which cannot run before the first
-   paint, so no stale timestamp is ever shipped in the markup. */
-(function (S) {
+   NOTHING HERE IS ADDED UP LOCALLY AND NOTHING IS SHOWN BEFORE THE SERVER
+   AGREES TO IT. Every write goes out through S.api; the new balance, the new
+   ledger row and its timestamp come back in the response and are copied in as
+   they are. A refused or lost request therefore leaves the list, the balance
+   and the ledger exactly as they were, and says why in the status line under
+   the button. While a write is in flight the control that started it reads
+   "Ukladá sa…" and the page takes no further commands, so one click can never
+   become two charges. */
+SKYRO.page(function (S, root) {
   "use strict";
 
   var QUICK = [10, 20, 50, 100];
-  var ADMIN_NAME = "Katarína Vrábľová";
+  var SAVING = "Ukladá sa…";
 
   /* Working copies: this page edits accounts and writes ledger rows, the
      fixtures stay clean. */
@@ -31,18 +37,22 @@
   var creating = false;             // the sidebar shows the new-account form
   var amount = "";                  // staged top-up, exactly as typed ("12,50")
   var note = "";                    // status line under the top-up button
+  var noteOk = true;                // false turns that line into a refusal
+
+  /* The write on its way to the server: "credit", "toggle" or "create", plus
+     the account it belongs to. Every action returns early while this is set,
+     so a second click is ignored rather than queued — which is the whole
+     reason one press cannot charge an account twice. */
+  var busy = "";
+  var busyId = "";
 
   /* the new-account form */
   var newName = "";
   var newTrieda = "";
   var newEmail = "";
   var emailEdited = false;          // once true, the name stops filling the address
-
-  var root = S.mount();
   var sub = null;                   // the page-head subtitle, re-read when counts move
   var announceTimer = null;
-
-  function pad2(v) { return v < 10 ? "0" + v : "" + v; }
 
   /* Green covers lunches, peach is nearly out, rose is empty. */
   function balanceState(balance) {
@@ -59,9 +69,55 @@
   /* Slovak counts lunches in three shapes: 1 obed, 2–4 obedy, 5+ obedov. */
   function obed(n) { return n === 1 ? "obed" : n < 5 ? "obedy" : "obedov"; }
 
-  function stamp() {
-    var d = new Date();
-    return "dnes " + d.getHours() + ":" + pad2(d.getMinutes());
+  /* True while the control on screen is the one waiting for an answer. The
+     markup asks as well as the click handler: anything that repaints during a
+     write must draw the same pending button, or the control comes back
+     clickable while the request is still out. */
+  function writing(kind, id) {
+    return busy === kind && (id === undefined || busyId === id);
+  }
+
+  /* The pending state, written in place so the panel around it is not rebuilt
+     and the amount typed into the field beside it is not disturbed: the button
+     keeps its class and its place, says what it is doing, and stops taking
+     clicks. Same wording and same icon as the student app's confirm button. */
+  function pendingHtml() {
+    return S.icon("progress_activity") + SAVING;
+  }
+
+  function pending(btn) {
+    if (!btn) return;
+    btn.disabled = true;
+    btn.setAttribute("aria-busy", "true");
+    btn.innerHTML = pendingHtml();
+  }
+
+  /* The server's record replaces ours whole — balance, active flag and all.
+     Nothing about an account is recomputed on this side. */
+  function applyStudent(rec) {
+    if (!rec || !rec.id) return null;
+    for (var i = 0; i < students.length; i++) {
+      if (students[i].id === rec.id) {
+        students[i] = Object.assign({}, rec);
+        return students[i];
+      }
+    }
+    return null;
+  }
+
+  /* One ending for every failed write. err.message is already Slovak and
+     already safe to show, so this page never writes its own text for it: the
+     refusal goes into the same status line a local refusal uses, the control
+     comes back enabled, and not one byte of local state has moved. */
+  function fail(err, focusSel) {
+    busy = "";
+    busyId = "";
+    note = (err && err.message) || "Nastala chyba. Skúste to znova.";
+    noteOk = false;
+    paintAside();
+    var el = focusSel ? S.$(focusSel, root) : null;
+    if (el) el.focus();
+    S.announce(S.$("#live"), note);
   }
 
   function selected() {
@@ -80,8 +136,11 @@
   }
 
   /* Slovak keyboards type "12,50", not "12.50". */
-  function parsed() { return Number(amount.replace(",", ".")); }
-  function validAmount() { var v = parsed(); return isFinite(v) && v > 0; }
+  /* Bare Number() accepted "0x10" (16 €), "1e3" (1000 €) and a third decimal
+     that drifted the ledger a cent from the balance. S.parseAmount refuses
+     all of those and caps a typo at S.MAX_TOPUP. */
+  function parsed() { return S.parseAmount(amount); }
+  function validAmount() { return parsed() !== null; }
 
   function subtitle() {
     var low = students.filter(function (s) {
@@ -141,6 +200,10 @@
   }
 
   function creditBtn() {
+    if (writing("credit", selId)) {
+      return '<button type="button" class="btn block" id="credit" disabled aria-busy="true">' +
+        pendingHtml() + "</button>";
+    }
     var ok = validAmount();
     return '<button type="button" class="btn block" id="credit"' + (ok ? "" : " disabled") + ">" +
       S.icon("add_card") + "Pripísať" +
@@ -176,8 +239,20 @@
             "Žiak sa prihlasuje jednorazovým odkazom na túto adresu.</p>" +
         "</div>" +
 
-        '<button class="btn block" type="submit" id="make"' + (ready ? "" : " disabled") + ">" +
-          S.icon("person_add") + "Vytvoriť účet</button>" +
+        (writing("create")
+          ? '<button class="btn block" type="submit" id="make" disabled aria-busy="true">' +
+            pendingHtml() + "</button>"
+          : '<button class="btn block" type="submit" id="make"' + (ready ? "" : " disabled") + ">" +
+            S.icon("person_add") + "Vytvoriť účet</button>") +
+
+        /* The same status line as the top-up panel below. A refusal from here
+           — an address the server already knows, or a request that never
+           landed — has to be readable without closing the form. */
+        (note
+          ? '<p class="note mt-s" role="status" style="font-weight:600;color:' +
+            (noteOk ? "var(--c-green)" : "var(--c-rose)") + '">' +
+            S.esc(note) + "</p>"
+          : "") +
       "</div></form>";
   }
 
@@ -224,13 +299,17 @@
         /* Written out for the eye; the live region says the same thing for
            screen readers, so this carries no role of its own. */
         (note
-          ? '<p class="note mt-s" style="color:var(--c-green);font-weight:600">' +
+          ? '<p class="note mt-s" role="status" style="font-weight:600;color:' +
+            (noteOk ? "var(--c-green)" : "var(--c-rose)") + '">' +
             S.esc(note) + "</p>"
           : "") +
 
-        '<button type="button" class="btn soft block mt-s" id="toggle">' +
-          S.icon(s.active ? "block" : "check_circle") +
-          (s.active ? "Deaktivovať účet" : "Aktivovať účet") + "</button>" +
+        '<button type="button" class="btn soft block mt-s" id="toggle"' +
+          (writing("toggle", s.id) ? ' disabled aria-busy="true"' : "") + ">" +
+          (writing("toggle", s.id)
+            ? pendingHtml()
+            : S.icon(s.active ? "block" : "check_circle") +
+              (s.active ? "Deaktivovať účet" : "Aktivovať účet")) + "</button>" +
       "</div>" +
 
       '<div class="plain">' +
@@ -384,14 +463,19 @@
       btn.setAttribute("aria-pressed", String(btn.getAttribute("data-amt") === amount));
     });
 
-    var ok = validAmount();
+    /* The button belongs to the write in flight; typing must not hand it
+       back before the server has answered. */
     var btn = S.$("#credit", root);
+    if (!btn || writing("credit", selId)) return;
+
+    var ok = validAmount();
     btn.disabled = !ok;
     btn.innerHTML = S.icon("add_card") + "Pripísať" +
       (ok ? '<span class="qty">' + S.eur(parsed()) + "</span>" : "");
   }
 
   function syncCreate() {
+    if (writing("create")) return; // the submit button is waiting on the server
     var make = S.$("#make", root);
     if (make) make.disabled = !(newName.trim() && newTrieda.trim());
   }
@@ -402,10 +486,16 @@
      to another account clears it, and the status line with it, so 100 € armed
      for one account can never be pressed onto the next one. */
   function select(id) {
+    /* A write in flight belongs to the account it was started on. Letting the
+       panel move to another name underneath it is exactly the bug this file
+       opens with, so the list is inert for the moment the write takes. */
+    if (busy) return;
+
     selId = id;
     creating = false;
     amount = "";
     note = "";
+    noteOk = true;
 
     paintList();
     paintAside();
@@ -418,49 +508,100 @@
   }
 
   function credit() {
+    if (busy) return; // a write is already on its way; a second press is not a second charge
     var s = selected();
     if (!s || !validAmount()) return;
+    /* A deactivated account cannot order lunch, so putting money on it just
+       strands the money. Refuse, and say so. The server refuses it too — this
+       only saves the round trip. */
+    if (!s.active) {
+      note = "Účet je neaktívny — najprv ho aktivujte, potom pripíšte kredit.";
+      noteOk = false;
+      paintAside();
+      var refused = S.$("#credit", root);
+      if (refused) refused.focus();
+      S.announce(S.$("#live"), note);
+      return;
+    }
 
     var value = parsed();
-    s.balance = Number((s.balance + value).toFixed(2));
-    ledger.unshift({
-      id: "l" + Date.now(),
-      studentId: s.id,
-      amount: value,
-      label: "Dobitie kreditu",
-      at: stamp(),
-      by: ADMIN_NAME,
+    var id = s.id;
+
+    busy = "credit";
+    busyId = id;
+    pending(S.$("#credit", root));
+
+    S.api.creditStudent(id, value).then(function (resp) {
+      busy = "";
+      busyId = "";
+
+      /* The money is the server's arithmetic, not ours: the balance and the
+         ledger row — amount, label, timestamp, who did it — are copied out of
+         the response exactly as they came. */
+      var rec = applyStudent(resp && resp.student) || s;
+      if (resp && resp.entry) ledger.unshift(resp.entry);
+      var charged = resp && resp.entry && typeof resp.entry.amount === "number"
+        ? resp.entry.amount : value;
+
+      /* Emptying the field disarms the button, so the same sum cannot be
+         credited twice by a second click. */
+      amount = "";
+      note = "Pripísané " + S.eur(charged) + " žiakovi " + rec.name + ".";
+      noteOk = true;
+
+      paintHead();
+      paintList();
+      paintAside();
+
+      var amt = S.$("#amt", root);
+      if (amt) amt.focus(); // the button it was pressed on is disabled now
+      S.announce(S.$("#live"), note + " Nový zostatok " + S.eur(rec.balance) + ".");
+    }, function (err) {
+      /* No balance moved, no ledger row was written, and the typed amount is
+         still in the field to try again with. */
+      fail(err, "#credit");
     });
-
-    /* Emptying the field disarms the button, so the same sum cannot be
-       credited twice by a second click. */
-    amount = "";
-    note = "Pripísané " + S.eur(value) + " žiakovi " + s.name + ".";
-
-    paintHead();
-    paintList();
-    paintAside();
-
-    S.$("#amt", root).focus(); // the button it was pressed on is disabled now
-    S.announce(S.$("#live"), note + " Nový zostatok " + S.eur(s.balance) + ".");
   }
 
   function toggleActive() {
+    if (busy) return;
     var s = selected();
     if (!s) return;
 
-    s.active = !s.active;
+    var next = !s.active;
 
-    paintHead();
-    paintList();
-    paintAside();
+    busy = "toggle";
+    busyId = s.id;
+    pending(S.$("#toggle", root));
 
-    S.$("#toggle", root).focus(); // paintAside() replaced the button under us
-    S.announce(S.$("#live"), "Účet žiaka " + s.name +
-      (s.active ? " je aktívny." : " je neaktívny."));
+    S.api.setStudentActive(s.id, next).then(function (resp) {
+      busy = "";
+      busyId = "";
+
+      /* The flag the list and the chip draw is the one that came back, never
+         the one that was asked for. */
+      var rec = applyStudent(resp && resp.student) || s;
+
+      /* A standing refusal was about the account as it was a moment ago — it
+         must not outlive the change. A green confirmation stands. */
+      if (!noteOk) { note = ""; noteOk = true; }
+
+      paintHead();
+      paintList();
+      paintAside();
+
+      var btn = S.$("#toggle", root);
+      if (btn) btn.focus(); // paintAside() replaced the button under us
+      S.announce(S.$("#live"), "Účet žiaka " + rec.name +
+        (rec.active ? " je aktívny." : " je neaktívny."));
+    }, function (err) {
+      /* The account is still whatever it was before the click. */
+      fail(err, "#toggle");
+    });
   }
 
   function startCreate() {
+    if (busy) return;
     creating = true;
     newName = "";
     newTrieda = "";
@@ -468,45 +609,77 @@
     emailEdited = false;
     amount = ""; // nothing stays armed behind a panel that is no longer shown
     note = "";
+    noteOk = true;
 
     paintAside();
     S.$("#n", root).focus();
   }
 
   function closeCreate() {
+    if (busy) return;
     creating = false;
     paintAside();
     S.$("#new", root).focus(); // back to the control that opened the form
   }
 
   function createStudent() {
+    if (busy) return;
+
     var nm = newName.trim();
     var tr = newTrieda.trim();
     if (!nm || !tr) return;
 
-    var fresh = {
-      id: "s" + Date.now(),
-      name: nm,
-      email: newEmail.trim() || S.schoolEmail(nm),
-      trieda: tr,
-      balance: 0,
-      active: true,
-      created: "dnes",
-    };
+    var addr = newEmail.trim() || S.schoolEmail(nm);
 
-    students.unshift(fresh);
-    selId = fresh.id;
-    creating = false;
-    amount = "";
-    note = "Účet pre " + nm + " je vytvorený. Kredit je zatiaľ nulový.";
+    /* The school address is the account's identity. Two accounts sharing one
+       means whichever is found first gets the credit. The server checks this
+       against every account, not just the ones on this screen — the check
+       here only saves the round trip. */
+    var wanted = addr.toLowerCase();
+    var clash = students.filter(function (x) { return x.email.toLowerCase() === wanted; })[0];
+    if (clash) {
+      note = "Účet s adresou " + wanted + " už existuje (" + clash.name + ").";
+      noteOk = false;
+      paintAside();
+      var dup = S.$("#em", root);
+      if (dup) dup.focus(); // the field that has to change is the address
+      S.announce(S.$("#live"), note);
+      return;
+    }
 
-    paintHead();
-    paintList();
-    paintAside();
+    busy = "create";
+    busyId = "";
+    pending(S.$("#make", root));
 
-    S.$("#amt", root).focus(); // a new account starts empty; dobiť is next
-    S.announce(S.$("#live"), note);
+    S.api.createStudent({ name: nm, email: addr, trieda: tr }).then(function (resp) {
+      var fresh = resp && resp.student;
+      /* No account in the response means no account was created: say so
+         rather than putting a row in the list the server knows nothing of. */
+      if (!fresh || !fresh.id) { fail(null, "#make"); return; }
+
+      busy = "";
+      busyId = "";
+
+      /* The id, the address and the opening balance are the server's. */
+      students.unshift(Object.assign({}, fresh));
+      selId = fresh.id;
+      creating = false;
+      amount = "";
+      note = "Účet pre " + fresh.name + " je vytvorený. Kredit je zatiaľ nulový.";
+      noteOk = true;
+
+      paintHead();
+      paintList();
+      paintAside();
+
+      var amt = S.$("#amt", root);
+      if (amt) amt.focus(); // a new account starts empty; dobiť is next
+      S.announce(S.$("#live"), note);
+    }, function (err) {
+      /* The form stays open with everything still typed into it. */
+      fail(err, "#make");
+    });
   }
 
   render();
-})(window.SKYRO);
+});

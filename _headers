@@ -1,0 +1,31 @@
+# Cloudflare Pages applies the FIRST matching rule only, so the specific
+# paths must come BEFORE /*. With /* first, every rule below it was dead.
+
+/*.html
+  Cache-Control: private, no-store
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  X-Robots-Tag: noindex, nofollow
+  Permissions-Policy: geolocation=(), microphone=(), camera=()
+
+# JS and CSS filenames are NOT fingerprinted, so a long cache would serve
+# stale code after a deploy. Revalidate every time; 304s are cheap.
+/js/*
+  Cache-Control: public, max-age=0, must-revalidate
+  X-Content-Type-Options: nosniff
+
+/css/*
+  Cache-Control: public, max-age=0, must-revalidate
+  X-Content-Type-Options: nosniff
+
+/favicon.svg
+  Cache-Control: public, max-age=86400
+
+/*
+  Cache-Control: private, no-store
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  X-Robots-Tag: noindex, nofollow
+  Permissions-Policy: geolocation=(), microphone=(), camera=()

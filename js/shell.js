@@ -5,9 +5,11 @@ window.SKYRO = window.SKYRO || {};
 (function (S) {
   "use strict";
 
+  /* /kredit and /kredit.html are the same page; the nav speaks filenames. */
   function currentFile() {
     var f = window.location.pathname.split("/").pop();
-    return !f || f === "" ? "index.html" : f;
+    if (!f) return "index.html";
+    return f.indexOf(".") === -1 ? f + ".html" : f;
   }
 
   function rail(app, here) {
@@ -55,5 +57,16 @@ window.SKYRO = window.SKYRO || {};
     return S.$("#obsah");
   }
 
+  /* Reveal icons only once the ligature font can render them. Any failure
+     path — no document.fonts, a timeout, an offline school wifi — reveals
+     them anyway rather than leaving the UI iconless. */
+  function revealIconsWhenReady() {
+    var show = function () { document.documentElement.classList.add("fonts-ready"); };
+    window.setTimeout(show, 3000); // never hide icons for longer than this
+    if (!document.fonts || !document.fonts.load) { show(); return; }
+    document.fonts.load('24px "Material Symbols Outlined"').then(show, show);
+  }
+
   Object.assign(S, { mount: mount, currentFile: currentFile });
+  revealIconsWhenReady();
 })(window.SKYRO);

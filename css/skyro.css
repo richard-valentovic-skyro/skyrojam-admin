@@ -17,23 +17,23 @@
   --white: #ffffff;
   --paper: #faf9fe;
   --ink: #17123a;
-  --ink-2: #6e6a87;
-  --ink-3: #9a97ad;
+  --ink-2: #4f4c63;
+  --ink-3: #66637d;
   --hair: #ece9f6;
 
   /* category tints, lifted from the product's Overview cards */
   --t-blue: #edf2fd;
-  --c-blue: #2563eb;
+  --c-blue: #1d4ed8;
   --t-peach: #fef0e8;
-  --c-peach: #e2661b;
+  --c-peach: #a8460c;
   --t-green: #ecf6ee;
-  --c-green: #1b9a4b;
+  --c-green: #106b33;
   --t-lilac: #f2edfd;
-  --c-lilac: #7c3aed;
+  --c-lilac: #6425d0;
   --t-cream: #f7f5e6;
-  --c-cream: #8e8117;
+  --c-cream: #6b6111;
   --t-rose: #fdecef;
-  --c-rose: #e03a5a;
+  --c-rose: #b21d3a;
 
   --r-card: 22px;
   --r-tile: 16px;
@@ -492,7 +492,9 @@ h1 {
   color: var(--ink);
   transition:
     background 0.18s ease,
-    color 0.18s ease;
+    color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
 }
 
 .mcard .disc .ms {
@@ -548,7 +550,14 @@ h1 {
 .mcard[aria-pressed="true"] .disc {
   background: var(--violet);
   color: #fff;
-  border-color: rgba(255, 255, 255, 0.5);
+  /* The unselected disc is glass floating on the card, so it carries a white
+     rim and a white inner highlight. Selected, it is a solid accent — keeping
+     the glass treatment left a white crescent burning through the top edge.
+     Drop the rim, the highlight and the blur; carry a violet shadow instead. */
+  border-color: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  box-shadow: 0 6px 16px rgba(108, 41, 242, 0.34);
 }
 
 .mcard[aria-pressed="true"] .no {

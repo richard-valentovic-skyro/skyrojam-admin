@@ -146,3 +146,309 @@
   min-width: 1em;
   text-align: center;
 }
+
+/* =====================================================================
+   LOGIN — the states the screen needs to be finished.
+   The original had one field and three controls that did nothing. These
+   are the pieces that make every control real, without a backend.
+   ===================================================================== */
+
+/* the submit arrow, when there is nothing to submit */
+.ago[disabled] {
+  background: #e4e0f0;
+  color: var(--ink-3);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.afield input::placeholder { color: var(--ink-3); }
+
+/* the field, when what is in it was refused */
+.afield.bad {
+  box-shadow:
+    inset 0 0 0 1.5px var(--c-rose),
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    0 6px 20px rgba(224, 58, 90, 0.12);
+}
+
+.aerr {
+  width: 100%;
+  margin: 14px 0 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.55;
+  color: var(--c-rose);
+  text-align: left;
+}
+
+/* step two: the link was requested */
+.asent {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.asent .disc {
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(27, 154, 75, 0.12);
+  color: var(--c-green);
+  margin-bottom: 22px;
+}
+
+.asent .disc .ms { font-size: 30px; }
+
+.asent .addr {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--ink);
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.arow {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  margin-top: 26px;
+}
+
+.arow .btn { flex: 1; }
+
+.acount {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--ink-3);
+}
+
+/* "Nedarí sa vám prihlásiť?" — a real disclosure, not a dead link */
+.ahelp {
+  width: 100%;
+  margin-top: 14px;
+  border-radius: var(--r-card);
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow: inset 0 0 0 1px var(--hair);
+  padding: 16px 18px;
+  text-align: left;
+}
+
+.ahelp p {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+.ahelp p:last-child { margin-bottom: 0; }
+
+.ahelp b {
+  color: var(--ink);
+  font-weight: 800;
+}
+
+/* An honest line: this screen is not wired to anything yet. Quiet on
+   purpose — the restraint of the screen matters, and a loud box would
+   shout louder than the sign-in itself. */
+.aproto {
+  width: 100%;
+  margin: 16px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  font-weight: 600;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+.aproto b {
+  color: var(--c-cream);
+  font-weight: 800;
+}
+
+/* =====================================================================
+   BOOT — what the page shows while data is on its way, and when it fails.
+   Invisible in mock mode (resolves immediately), essential once a real
+   server is answering over a school wifi.
+   ===================================================================== */
+.boot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  min-height: 50vh;
+}
+
+.boot-spin {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 3px solid var(--hair);
+  border-top-color: var(--violet);
+  animation: boot-spin 0.7s linear infinite;
+}
+
+@keyframes boot-spin { to { transform: rotate(360deg); } }
+
+.boot-msg {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-3);
+  line-height: 1.6;
+  max-width: 40ch;
+}
+
+.empty .boot-msg { margin: 6px 0 18px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-spin { animation-duration: 2s; }
+}
+
+/* ---------- login: password ----------
+   With two fields the inline submit arrow no longer works, so the fields
+   stack and a full-width primary button carries the action. */
+.astack {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* the second link under the hairline sits closer than the first */
+.alink + .alink { margin-top: 10px; }
+
+/* a field with no button inside it */
+.afield.solo { padding: 11px 18px; }
+
+/* show / hide the password */
+.apeek {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--ink-3);
+  display: grid;
+  place-items: center;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.apeek .ms { font-size: 19px; }
+
+.apeek:hover { background: var(--violet-50); color: var(--violet); }
+
+.afield input[type="password"] { letter-spacing: 0.08em; }
+
+
+/* a link that is temporarily unavailable (the resend countdown) */
+.alink[disabled] {
+  color: var(--ink-3);
+  cursor: default;
+}
+
+/* =====================================================================
+   AUDIT FIXES — each reproduced in a browser before being changed here.
+   ===================================================================== */
+
+/* The ordering sidebar sits ~2000px below the fold on a phone, so picking a
+   meal looked like it did nothing. Below the two-column breakpoint it becomes
+   the phone app's action bar: pinned to the bottom, showing only the choice,
+   the price and the button. */
+@media (max-width: 1279px) {
+  .split > .aside.order-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 12;
+    margin: 0 -20px -20px;
+    padding: 12px 20px 14px;
+    gap: 10px;
+    background: linear-gradient(
+      158deg,
+      rgba(255, 255, 255, 0.9),
+      rgba(255, 255, 255, 0.78)
+    );
+    -webkit-backdrop-filter: blur(22px) saturate(190%);
+    backdrop-filter: blur(22px) saturate(190%);
+    box-shadow: 0 -8px 28px rgba(56, 26, 118, 0.12);
+    border-top: 1px solid rgba(255, 255, 255, 0.7);
+  }
+  .order-bar .order-hide { display: none; }
+  .order-bar .order-summary {
+    padding: 0;
+    background: none;
+    box-shadow: none;
+  }
+  .order-bar .order-summary .ph { margin-bottom: 8px; }
+  .order-bar .dmeal .disc { width: 40px; height: 40px; }
+  .order-bar .dmeal .disc .ms { font-size: 20px; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .split > .aside.order-bar { background: #fff; backdrop-filter: none; }
+}
+
+/* Rail icons inherited the link underline, drawing a white line under every
+   glyph. text-decoration does not inherit through to the span otherwise. */
+.rail a,
+.rail a:hover,
+.rail a:focus { text-decoration: none; }
+
+/* A pasted URL in a chat bubble pushed 265px of horizontal scroll onto the
+   whole page. Long unbroken strings must wrap inside the bubble. */
+.msg,
+.cp,
+.ll,
+.un2,
+.ue { overflow-wrap: anywhere; }
+
+/* Ledger rows truncated the meal name to a few characters on a phone. */
+@media (max-width: 560px) {
+  .led .ll { white-space: normal; }
+}
+
+/* Phones in landscape are ~390px tall: the rail's lower items — including
+   logout — were cut off with no way to reach them. */
+@media (max-height: 620px) {
+  .rail { overflow-y: auto; padding-bottom: 12px; }
+  .railfoot { margin-top: 16px; }
+}
+
+/* Sub-24px tap targets on the login screen. */
+.acheck,
+.alink {
+  min-height: 24px;
+  padding-block: 2px;
+}
+
+/* iOS Safari zooms the whole page whenever a focused field is under 16px.
+   It happened on every search box, chat composer and login field. */
+@media (max-width: 860px) {
+  input,
+  textarea,
+  select,
+  .finput,
+  .chatinput,
+  .search input,
+  .afield input { font-size: 16px; }
+}
+
+/* Material Symbols renders its ligature NAME until the font arrives, so the
+   Slovak UI briefly filled with English words like "restaurant_menu". Hide
+   the glyph box until the font is ready; .fonts-ready is set by shell.js.
+   Without JS the icons still appear — this only suppresses the flash. */
+.ms {
+  visibility: hidden;
+  display: inline-block;
+  min-width: 1em;
+}
+
+.fonts-ready .ms,
+.no-js .ms { visibility: visible; }

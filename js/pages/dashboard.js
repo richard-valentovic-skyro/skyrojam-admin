@@ -11,12 +11,10 @@
    The bars are scaled against the busiest meal rather than the total, so the
    widest row always reaches the end of its track; the .q modifier marks the
    meals the kitchen cooks fewer than 20 portions of. */
-(function (S) {
+SKYRO.page(function (S, root) {
   "use strict";
 
   var QUIET = 20; // under this many portions a row is drawn in the pale violet
-
-  var root = S.mount();
 
   /* The busiest meal sets the scale for every bar. */
   var max = Math.max.apply(null, S.MEALS.map(function (m) { return m.c; }));
@@ -87,4 +85,4 @@
   }
 
   render();
-})(window.SKYRO);
+});

@@ -13,8 +13,16 @@ window.SKYRO = window.SKYRO || {};
 
   /** Slovak formatting: 5,50 €. Hand-rolled so server and client always agree. */
   function eur(n) {
-    const sign = n < 0 ? "−" : "";
-    return `${sign}${Math.abs(n).toFixed(2).replace(".", ",")} €`;
+    var v = Number(n);
+    /* Never let Infinity, NaN, or a number so large that toFixed() switches
+       to exponential notation, reach a price label. No real lunch account
+       holds a quadrillion euros. */
+    if (!isFinite(v) || Math.abs(v) >= 1e15) return "— €";
+    var sign = v < 0 ? "−" : "";
+    var parts = Math.abs(v).toFixed(2).split(".");
+    /* Slovak groups thousands with a non-breaking space: 1 012,00 € */
+    var whole = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, "\u00a0");
+    return sign + whole + "," + parts[1] + " €";
   }
 
   /** How many lunches a balance still covers. */
@@ -49,7 +57,7 @@ window.SKYRO = window.SKYRO || {};
 
   const LEDGER = [
     { id: "l1", studentId: "s1", amount: -LUNCH_PRICE, label: "Obed 1, Bryndzové halušky", at: "dnes 9:02" },
-    { id: "l2", studentId: "s1", amount: -LUNCH_PRICE, label: "Obed 3, Kuracie prsia", at: "včera 8:58" },
+    { id: "l2", studentId: "s1", amount: -LUNCH_PRICE, label: "Obed 3, Kuracie prsia", at: "dnes 8:58" },
     { id: "l3", studentId: "s1", amount: 50, label: "Dobitie kreditu", at: "11. sep 8:40", by: "Katarína Vrábľová" },
     { id: "l4", studentId: "s1", amount: -LUNCH_PRICE, label: "Obed 2, Vyprážaný rezeň", at: "11. sep 8:12" },
     { id: "l5", studentId: "s1", amount: -LUNCH_PRICE, label: "Obed 9, Caesar šalát", at: "9. sep 8:30" },
@@ -239,7 +247,7 @@ window.SKYRO = window.SKYRO || {};
     {
       imp: true,
       t: "Uzávierka objednávok sa mení na 14:00",
-      b: "Od pondelka 21. septembra sa objednávky na nasledujúci deň uzatvárajú o 14:00 namiesto 15:30. Platí pre všetky ročníky.",
+      b: "Objednávky sa uzatvárajú o 14:00 v deň obeda. Predtým to bolo 15:30. Platí pre všetky ročníky.",
       m: "dnes 9:12, Katarína Vrábľová",
     },
     {
@@ -280,7 +288,7 @@ window.SKYRO = window.SKYRO || {};
     {
       kind: "msg",
       from: "them",
-      text: "Dobrý deň Matej, objednávku na piatok som zrušila podľa vašej žiadosti.",
+      text: "Dobrý deň Matej, obed na piatok som vám potvrdila podľa vašej žiadosti.",
       at: "14:52",
     },
     {
@@ -330,5 +338,62 @@ window.SKYRO = window.SKYRO || {};
     return n === 1 ? "jedlo" : n >= 2 && n <= 4 ? "jedlá" : "jedál";
   }
 
-  Object.assign(S, { pluralZaznam, pluralObed, LUNCH_PRICE, eur, lunchesLeft, CURRENT_STUDENT_ID, STUDENTS, LEDGER, schoolEmail, MEALS, WEEK, ORDERS, POSTS, CONVS, THREAD, TOTAL_TODAY, initials, plural });
+  /* ---------- staff ----------
+     Who may sign in to the admin panel. The student roster is not enough:
+     a student address typed into the admin app must be refused. */
+  const STAFF = [
+    { email: "katarina.vrablova@skyro.ai", name: "Katarína Vrábľová", role: "Vedúca jedálne" },
+    { email: "jana.kovacova@skyro.ai",     name: "Jana Kováčová",     role: "Kuchárka" },
+    { email: "peter.hlavaty@skyro.ai",     name: "Peter Hlavatý",     role: "Správca systému" }
+  ];
+
+  const SCHOOL_DOMAIN = "skyro.ai";
+
+  /* Deliberately loose: this is a shape check, not an address validator.
+     Anything that looks like a@b.c passes, the domain check does the rest. */
+  function looksLikeEmail(v) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(v).trim());
+  }
+
+  function isSchoolAddress(v) {
+    return String(v).trim().toLowerCase().endsWith("@" + SCHOOL_DOMAIN);
+  }
+
+  /* The school issues usernames as the address without the domain:
+     matej.hrusovsky@skyro.ai -> matej.hrusovsky */
+  function usernameOf(email) {
+    return String(email || "").split("@")[0].toLowerCase();
+  }
+
+  /* Letters, digits, dot, dash, underscore. Deliberately strict: a username
+     is issued by the school, not chosen by the user. */
+  function looksLikeUsername(v) {
+    return /^[a-z0-9._-]{2,64}$/.test(String(v).trim().toLowerCase());
+  }
+
+  /* Parsing a money amount typed by a human.
+
+     Bare Number() is wrong here and was the cause of three confirmed bugs:
+     it accepts "0x10" (credits 16 €), "1e3" (credits 1000 €), and silently
+     keeps a third decimal so "5,555" credited 5.555 while every screen
+     displayed 5,56 — the ledger and the balance then drifted by a cent.
+
+     Returns null when the text is not a usable amount. */
+  function parseAmount(text) {
+    var t = String(text == null ? "" : text).trim().replace(/\u00a0/g, " ");
+    if (!t) return null;
+    t = t.replace(/\s/g, "").replace(",", ".");
+    /* Digits only, at most two decimals. No sign, no exponent, no hex. */
+    if (!/^\d{1,9}(\.\d{1,2})?$/.test(t)) return null;
+    var v = Number(t);
+    if (!isFinite(v) || v <= 0) return null;
+    if (v > MAX_TOPUP) return null;
+    return Number(v.toFixed(2));
+  }
+
+  /* A canteen top-up is tens of euros. A typo that adds a zero should be
+     refused, not silently applied and then impossible to undo. */
+  const MAX_TOPUP = 500;
+
+  Object.assign(S, { parseAmount, MAX_TOPUP, usernameOf, looksLikeUsername, STAFF, SCHOOL_DOMAIN, looksLikeEmail, isSchoolAddress, pluralZaznam, pluralObed, LUNCH_PRICE, eur, lunchesLeft, CURRENT_STUDENT_ID, STUDENTS, LEDGER, schoolEmail, MEALS, WEEK, ORDERS, POSTS, CONVS, THREAD, TOTAL_TODAY, initials, plural });
 })(window.SKYRO);

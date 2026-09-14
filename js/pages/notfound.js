@@ -4,10 +4,8 @@
 
    This one keeps the rail and the topbar, says what happened in Slovak, and
    always offers the way back to the overview. */
-(function (S) {
+SKYRO.page(function (S, root) {
   "use strict";
-
-  var root = S.mount();
 
   root.innerHTML =
     '<div class="empty">' +
@@ -18,8 +16,8 @@
       "Stránka, ktorú hľadáte, neexistuje alebo bola presunutá.<br>" +
       "Skontrolujte adresu alebo sa vráťte na prehľad jedálne." +
       '<div class="mt-m">' +
-        '<a class="btn" href="index.html" style="text-decoration:none">' +
+        '<a class="btn" href="/index.html" style="text-decoration:none">' +
           S.icon("arrow_back") + "Späť na prehľad</a>" +
       "</div>" +
     "</div>";
-})(window.SKYRO);
+});

@@ -23,7 +23,7 @@
 
    No clock is read during the first paint: the only `new Date()` is inside
    send(), which cannot run before the page is up. */
-(function (S) {
+SKYRO.page(function (S, root) {
   "use strict";
 
   /* A working copy: marking the inbox read clears `u` here, the fixture keeps
@@ -36,8 +36,6 @@
   var sel = 0;
   var sent = {}; // conversation index -> messages sent from this chair
   var announceTimer = null;
-
-  var root = S.mount();
 
   function pad2(v) { return v < 10 ? "0" + v : "" + v; }
 
@@ -270,4 +268,4 @@
   }
 
   render();
-})(window.SKYRO);
+});
