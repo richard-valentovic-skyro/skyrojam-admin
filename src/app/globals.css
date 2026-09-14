@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+/* Scan the design-system copy for class names too. */
+@source "../shared";
+
+/* The design system, ported from the mobile app. This file is DUPLICATED in
+   the other app (student/admin) — if you change it, change it in both. */
+@import "../shared/skyro.css";
+
+@theme inline {
+  --color-violet-brand: var(--violet);
+  --color-violet-700: var(--violet-700);
+  --color-violet-300: var(--violet-300);
+  --color-violet-50: var(--violet-50);
+  --color-paper: var(--paper);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-hair: var(--hair);
+  --font-sans: var(--font-jakarta), "Segoe UI", system-ui, sans-serif;
+}
