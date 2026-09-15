@@ -11,5 +11,11 @@
 */
 window.SKYRO = window.SKYRO || {};
 window.SKYRO.CONFIG = {
-  API_BASE: ""
+  API_BASE: "",
+
+  /* Ordering for a given day closes at this hour, school local time.
+     Every screen that names the deadline derives its wording from this —
+     change it here and the countdown, the notes, the week view and the
+     admin copy all follow. The window opens at midnight the same day. */
+  ORDER_DEADLINE_HOUR: 8
 };

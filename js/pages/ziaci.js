@@ -1,286 +1,237 @@
-/* Student accounts: find a student, read their credit, top it up.
+/* Žiaci — find a student, read their credit, top it up, turn the account on
+   or off. Those are the only two writes the API has for an account, so they
+   are the only two controls on this page.
 
-   The React build staged the top-up amount in state that outlived the
-   selection. Arm 100 €, click a different name in the list, press Pripísať,
-   and the money landed on the wrong account — the panel had already redrawn
-   with the new student's name above the armed sum. select() clears the staged
-   amount and the status line here, so a sum can only ever be credited to the
-   student it was typed for.
+   THERE IS NO "NEW STUDENT" FORM. The spec has no POST /students: accounts
+   come from the school's system administrator. The old form has been removed
+   rather than left as a button that posts to nothing, and the page header says
+   plainly where an account comes from instead.
 
-   The balance is the number the canteen keeps on the account, exactly as on
-   the student's own credit page: it is read from the record and never
-   re-summed from the ledger rows below it. A top-up moves it once, on an
-   explicit click, and the amount is cleared the moment the server confirms
-   the charge — so a second press of an already-spent sum does nothing.
+   THERE IS NO LEDGER EITHER. Nothing in the API returns movements, so the
+   balance is the whole story — and it is the balance the server sent, never a
+   sum of rows re-added on this side.
 
-   NOTHING HERE IS ADDED UP LOCALLY AND NOTHING IS SHOWN BEFORE THE SERVER
-   AGREES TO IT. Every write goes out through S.api; the new balance, the new
-   ledger row and its timestamp come back in the response and are copied in as
-   they are. A refused or lost request therefore leaves the list, the balance
-   and the ledger exactly as they were, and says why in the status line under
-   the button. While a write is in flight the control that started it reads
-   "Ukladá sa…" and the page takes no further commands, so one click can never
-   become two charges. */
-SKYRO.page(function (S, root) {
+   Three rules hold this page together:
+
+   1. A STAGED AMOUNT BELONGS TO THE STUDENT IT WAS TYPED FOR. The React build
+      kept the amount in state that outlived the selection: arm 100 €, click
+      another name, press Pripísať, and the money landed on the wrong account.
+      select() clears the amount and the status line, so that is impossible.
+
+   2. NOTHING IS SHOWN BEFORE THE SERVER AGREES TO IT. Every write goes out
+      through S.api and the new balance or the new active flag is copied out of
+      the response exactly as it came. A refused or lost request leaves the
+      list, the balance and the panel exactly as they were and says why under
+      the button. While a write is open its control reads "Ukladá sa…" and the
+      page takes no further commands, so one click cannot become two charges.
+
+   3. THE SEARCH IS THE SERVER'S. Typing calls GET /students?q=, debounced, and
+      every reply carries the sequence number of the request that asked for it —
+      a slow answer to "ni" can never overwrite the fast answer to "nina".
+
+   The page paints once and then repaints in three narrow pieces. Rewriting the
+   whole page on a keystroke would take the caret out of the field being typed
+   into, so the search box and the amount field are never replaced while they
+   are in use. */
+var page = function (S, root) {
   "use strict";
 
-  var QUICK = [10, 20, 50, 100];
-  var SAVING = "Ukladá sa…";
+  /* Shortcuts on the till, in cents. The label stays "10 €" the way the button
+     is printed; every amount that lands on a balance goes through S.eur. */
+  var QUICK = [
+    { cents: 1000,  label: "10 €",  text: "10" },
+    { cents: 2000,  label: "20 €",  text: "20" },
+    { cents: 5000,  label: "50 €",  text: "50" },
+    { cents: 10000, label: "100 €", text: "100" }
+  ];
 
-  /* Working copies: this page edits accounts and writes ledger rows, the
-     fixtures stay clean. */
-  var students = S.STUDENTS.map(function (s) { return Object.assign({}, s); });
-  var ledger = S.LEDGER.slice();
+  var DEBOUNCE_MS = 300;
 
-  var q = "";                       // search text
-  var selId = students[0].id;       // the account on the right
-  var creating = false;             // the sidebar shows the new-account form
-  var amount = "";                  // staged top-up, exactly as typed ("12,50")
-  var note = "";                    // status line under the top-up button
-  var noteOk = true;                // false turns that line into a refusal
+  var list = S.__students || [];
 
-  /* The write on its way to the server: "credit", "toggle" or "create", plus
-     the account it belongs to. Every action returns early while this is set,
-     so a second click is ignored rather than queued — which is the whole
-     reason one press cannot charge an account twice. */
+  /* The selected record is held apart from the list rather than looked up in
+     it. A search that excludes the selected student must not blank the panel
+     under the manager's hands mid-top-up. */
+  var sel = list[0] || null;
+
+  var q = "";              // search text
+  var amount = "";         // staged top-up, exactly as typed ("12,50")
+  var note = "";           // status line under the top-up button
+  var noteOk = true;       // false turns that line into a refusal
+
+  /* The write on its way to the server: "credit" or "toggle", plus the account
+     it belongs to. Every action returns early while this is set, so a second
+     click is dropped rather than queued — the whole reason one press cannot
+     charge an account twice. */
   var busy = "";
   var busyId = "";
 
-  /* the new-account form */
-  var newName = "";
-  var newTrieda = "";
-  var newEmail = "";
-  var emailEdited = false;          // once true, the name stops filling the address
-  var sub = null;                   // the page-head subtitle, re-read when counts move
+  /* Search bookkeeping. searchSeq is the cancel-safety: only the newest
+     request may write to the list. */
+  var searchSeq = 0;
+  var searchTimer = null;
+  var searchErr = null;
   var announceTimer = null;
 
-  /* Green covers lunches, peach is nearly out, rose is empty. */
-  function balanceState(balance) {
-    if (balance < S.LUNCH_PRICE) return "bad";
-    if (balance < S.LUNCH_PRICE * 3) return "warn";
-    return "ok";
+  var sub = null;          // the page-head subtitle, re-read when counts move
+
+  /* ------------------------------------------------------------ reading */
+
+  /* Rose cannot buy a lunch, peach is down to the last few, otherwise the
+     ordinary ink — a balance in good standing is not a status. */
+  function balanceColor(cents) {
+    var c = Number(cents);
+    if (c < S.LUNCH_PRICE_CENTS) return "var(--c-rose)";
+    if (c < S.LUNCH_PRICE_CENTS * 3) return "var(--c-peach)";
+    return "var(--ink)";
   }
 
-  function balanceColor(balance) {
-    var st = balanceState(balance);
-    return st === "bad" ? "var(--c-rose)" : st === "warn" ? "var(--c-peach)" : "var(--ink)";
+  function rowById(id) {
+    var found = null;
+    list.forEach(function (s) { if (s.id === id) found = s; });
+    return found;
   }
 
-  /* Slovak counts lunches in three shapes: 1 obed, 2–4 obedy, 5+ obedov. */
-  function obed(n) { return n === 1 ? "obed" : n < 5 ? "obedy" : "obedov"; }
+  /* The server's answer replaces our copy field by field, in both places the
+     same account is drawn. Nothing about an account is recomputed here. */
+  function applyPatch(id, fields) {
+    if (sel && sel.id === id) Object.assign(sel, fields);
+    var row = rowById(id);
+    if (row && row !== sel) Object.assign(row, fields);
+  }
 
-  /* True while the control on screen is the one waiting for an answer. The
-     markup asks as well as the click handler: anything that repaints during a
-     write must draw the same pending button, or the control comes back
-     clickable while the request is still out. */
+  function parsed() { return S.parseAmountCents(amount); }
+
+  function quickByCents(cents) {
+    var found = null;
+    QUICK.forEach(function (item) { if (item.cents === cents) found = item; });
+    return found;
+  }
+
+  function subtitle() {
+    /* A search that failed knows nothing about the roster. Counting the rows
+       it did not get would put "0 účtov" in the header as if that were a
+       fact about the school. */
+    if (searchErr) return "Zoznam sa nepodarilo načítať";
+
+    var n = list.length;
+    var low = list.filter(function (s) {
+      return s.active && Number(s.balanceCents) < S.LUNCH_PRICE_CENTS;
+    }).length;
+    return n + " " + S.pluralUcet(n) + " · " + low + " bez kreditu na obed";
+  }
+
   function writing(kind, id) {
     return busy === kind && (id === undefined || busyId === id);
   }
 
-  /* The pending state, written in place so the panel around it is not rebuilt
-     and the amount typed into the field beside it is not disturbed: the button
-     keeps its class and its place, says what it is doing, and stops taking
-     clicks. Same wording and same icon as the student app's confirm button. */
+  /* ------------------------------------------------------------- markup */
+
+  /* Same wording and same icon as every other pending control in both apps,
+     so a write looks the same everywhere. */
   function pendingHtml() {
-    return S.icon("progress_activity") + SAVING;
+    return S.icon("progress_activity") + "Ukladá sa…";
   }
 
-  function pending(btn) {
+  /* Put a control into that state in place, without repainting the panel
+     around it: rebuilding the aside here would replace the amount field the
+     click came from. Only the label changes, and clicks stop. */
+  function markPending(btn) {
     if (!btn) return;
     btn.disabled = true;
     btn.setAttribute("aria-busy", "true");
     btn.innerHTML = pendingHtml();
   }
 
-  /* The server's record replaces ours whole — balance, active flag and all.
-     Nothing about an account is recomputed on this side. */
-  function applyStudent(rec) {
-    if (!rec || !rec.id) return null;
-    for (var i = 0; i < students.length; i++) {
-      if (students[i].id === rec.id) {
-        students[i] = Object.assign({}, rec);
-        return students[i];
-      }
-    }
-    return null;
-  }
-
-  /* One ending for every failed write. err.message is already Slovak and
-     already safe to show, so this page never writes its own text for it: the
-     refusal goes into the same status line a local refusal uses, the control
-     comes back enabled, and not one byte of local state has moved. */
-  function fail(err, focusSel) {
-    busy = "";
-    busyId = "";
-    note = (err && err.message) || "Nastala chyba. Skúste to znova.";
-    noteOk = false;
-    paintAside();
-    var el = focusSel ? S.$(focusSel, root) : null;
-    if (el) el.focus();
-    S.announce(S.$("#live"), note);
-  }
-
-  function selected() {
-    return students.filter(function (s) { return s.id === selId; })[0] || null;
-  }
-
-  /* Name, e-mail and trieda all answer the same box. */
-  function matches() {
-    var n = q.trim().toLowerCase();
-    if (!n) return students;
-    return students.filter(function (s) {
-      return s.name.toLowerCase().indexOf(n) > -1 ||
-        s.email.toLowerCase().indexOf(n) > -1 ||
-        s.trieda.toLowerCase().indexOf(n) > -1;
-    });
-  }
-
-  /* Slovak keyboards type "12,50", not "12.50". */
-  /* Bare Number() accepted "0x10" (16 €), "1e3" (1000 €) and a third decimal
-     that drifted the ledger a cent from the balance. S.parseAmount refuses
-     all of those and caps a typo at S.MAX_TOPUP. */
-  function parsed() { return S.parseAmount(amount); }
-  function validAmount() { return parsed() !== null; }
-
-  function subtitle() {
-    var low = students.filter(function (s) {
-      return s.active && s.balance < S.LUNCH_PRICE;
-    }).length;
-    return students.length + " účtov · " + low + " bez kreditu na obed";
-  }
-
-  /* ---------- markup ---------- */
-
   function studentRow(s) {
-    return '<button type="button" class="urow' + (s.id === selId ? " sel" : "") +
+    return '<button type="button" class="urow' + (sel && s.id === sel.id ? " sel" : "") +
       (s.active ? "" : " off") + '" data-id="' + S.esc(s.id) + '"' +
-      ' aria-pressed="' + (s.id === selId) + '">' +
+      ' aria-pressed="' + (!!sel && s.id === sel.id) + '">' +
       '<span class="av">' + S.esc(S.initials(s.name)) + "</span>" +
       '<span class="ui">' +
         '<span class="un2">' + S.esc(s.name) + "</span>" +
-        '<span class="ue">' + S.esc(s.email) + "</span>" +
+        '<span class="ue">' + S.esc(s.username) + "</span>" +
         /* The greyed-out row says "inactive" in colour alone; say it in words
            too, for anyone who never sees the colour. */
         (s.active ? "" : '<span class="sr-only">Neaktívny účet</span>') +
       "</span>" +
-      '<span class="utr">' + S.esc(s.trieda) + "</span>" +
-      '<span class="ubal" style="color:' + balanceColor(s.balance) + '">' +
-        S.eur(s.balance) + "</span>" +
+      '<span class="ubal" style="color:' + balanceColor(s.balanceCents) + '">' +
+        S.esc(S.eur(s.balanceCents)) + "</span>" +
     "</button>";
   }
 
   function listHtml() {
-    var list = matches();
-    if (list.length === 0) {
-      return '<div class="empty">' + S.icon("person_off") +
-        "Nikto sa nenašiel.<br>Skúste iné meno alebo triedu.</div>";
+    /* A failed search must not leave the previous rows on screen pretending
+       to answer the query that was typed. Say what happened, and offer the
+       same search again. */
+    if (searchErr) {
+      return '<div class="empty" role="alert">' + S.icon("cloud_off") +
+        "<b>Vyhľadávanie zlyhalo</b>" +
+        '<p class="boot-msg">' + S.esc(searchErr) + "</p>" +
+        '<button class="btn" type="button" id="search-retry">' +
+          S.icon("refresh") + "Skúsiť znova</button></div>";
     }
+
+    if (!list.length) {
+      return '<div class="empty">' + S.icon("person_off") +
+        (q.trim()
+          ? "<b>Nikto sa nenašiel</b>" +
+            '<p class="boot-msg">Skúste iné meno alebo používateľské meno.</p>'
+          : "<b>Zoznam účtov je prázdny</b>" +
+            '<p class="boot-msg">Účty žiakov zakladá správca školského systému.</p>') +
+        "</div>";
+    }
+
     return list.map(studentRow).join("");
   }
 
-  function ledRow(l) {
-    var up = l.amount > 0;
-    return '<div class="led ' + (up ? "up" : "down") + '">' +
-      '<span class="ldisc">' + S.icon(up ? "add" : "restaurant") + "</span>" +
-      '<span class="li">' +
-        '<span class="ll">' + S.esc(l.label) + "</span>" +
-        '<span class="lt">' + S.esc(l.at) +
-          (l.by ? " · " + S.esc(l.by) : "") + "</span>" +
-      "</span>" +
-      '<span class="la">' + (up ? "+" : "") + S.eur(l.amount) + "</span>" +
-    "</div>";
-  }
-
-  /* A shortcut, not a sum on an account: it stays "50 €", the way the button
-     is labelled on the till. Every amount that lands on a balance goes
-     through S.eur below. */
-  function quickBtn(a) {
-    return '<button type="button" class="qamt" data-amt="' + S.esc(a) + '"' +
-      ' aria-pressed="' + (amount === String(a)) + '">' + S.esc(a) + " €</button>";
+  function quickBtn(item) {
+    return '<button type="button" class="qamt" data-cents="' + S.esc(item.cents) + '"' +
+      ' aria-pressed="' + (parsed() === item.cents) + '">' + S.esc(item.label) + "</button>";
   }
 
   function creditBtn() {
-    if (writing("credit", selId)) {
+    if (writing("credit", sel.id)) {
       return '<button type="button" class="btn block" id="credit" disabled aria-busy="true">' +
         pendingHtml() + "</button>";
     }
-    var ok = validAmount();
-    return '<button type="button" class="btn block" id="credit"' + (ok ? "" : " disabled") + ">" +
+    var cents = parsed();
+    return '<button type="button" class="btn block" id="credit"' +
+      (cents === null ? " disabled" : "") + ">" +
       S.icon("add_card") + "Pripísať" +
-      (ok ? '<span class="qty">' + S.eur(parsed()) + "</span>" : "") + "</button>";
+      (cents === null ? "" : '<span class="qty">' + S.esc(S.eur(cents)) + "</span>") +
+      "</button>";
   }
 
-  function createForm() {
-    var ready = newName.trim() !== "" && newTrieda.trim() !== "";
-
-    return '<form class="plain" id="create">' +
-      '<div class="ph"><span class="pd">Nový účet žiaka</span>' +
-        '<button type="button" class="sq" id="close" aria-label="Zavrieť">' +
-          S.icon("close") + "</button></div>" +
-
-      '<div class="stack l">' +
-        "<div>" +
-          '<label class="flabel" for="n">Meno a priezvisko</label>' +
-          '<input id="n" class="finput" type="text" autocomplete="off"' +
-            ' placeholder="Napríklad Jana Nováková" value="' + S.esc(newName) + '">' +
-        "</div>" +
-
-        "<div>" +
-          '<label class="flabel" for="tr">Trieda</label>' +
-          '<input id="tr" class="finput" type="text" autocomplete="off"' +
-            ' placeholder="3.A" value="' + S.esc(newTrieda) + '">' +
-        "</div>" +
-
-        "<div>" +
-          '<label class="flabel" for="em">Školský e-mail</label>' +
-          '<input id="em" class="finput" type="email" autocomplete="off"' +
-            ' placeholder="meno.priezvisko@skyro.ai" value="' + S.esc(newEmail) + '">' +
-          '<p class="note mt-s">Predvyplní sa z mena bez diakritiky. ' +
-            "Žiak sa prihlasuje jednorazovým odkazom na túto adresu.</p>" +
-        "</div>" +
-
-        (writing("create")
-          ? '<button class="btn block" type="submit" id="make" disabled aria-busy="true">' +
-            pendingHtml() + "</button>"
-          : '<button class="btn block" type="submit" id="make"' + (ready ? "" : " disabled") + ">" +
-            S.icon("person_add") + "Vytvoriť účet</button>") +
-
-        /* The same status line as the top-up panel below. A refusal from here
-           — an address the server already knows, or a request that never
-           landed — has to be readable without closing the form. */
-        (note
-          ? '<p class="note mt-s" role="status" style="font-weight:600;color:' +
-            (noteOk ? "var(--c-green)" : "var(--c-rose)") + '">' +
-            S.esc(note) + "</p>"
-          : "") +
-      "</div></form>";
+  function noteHtml() {
+    if (!note) return "";
+    return '<p class="note mt-s" role="status" style="font-weight:600;color:' +
+      (noteOk ? "var(--c-green)" : "var(--c-rose)") + '">' + S.esc(note) + "</p>";
   }
 
   function asideHtml() {
-    if (creating) return createForm();
-
-    var s = selected();
-    if (!s) {
+    if (!sel) {
       return '<div class="plain dash"><p class="pempty"><b>Vyberte žiaka</b>' +
-        "Kliknite na účet v zozname a uvidíte jeho kredit, pohyby a možnosť dobiť.</p></div>";
+        "Kliknite na účet v zozname a uvidíte jeho zostatok, kredit a prístup " +
+        "k obedom.</p></div>";
     }
 
-    var left = S.lunchesLeft(s.balance);
-    var rows = ledger.filter(function (l) { return l.studentId === s.id; }).slice(0, 6);
+    var s = sel;
+    var left = S.lunchesLeft(s.balanceCents);
 
     return '<div class="plain">' +
         '<div class="ph"><span class="pd">' + S.esc(s.name) + "</span>" +
           S.chip(s.active ? "ok" : "open", s.active ? "Aktívny" : "Neaktívny") + "</div>" +
 
-        '<div class="row mb-m"><div class="ue">' + S.esc(s.email) + "</div>" +
-          '<span class="utr">' + S.esc(s.trieda) + "</span></div>" +
+        '<div class="ue mb-m">' + S.esc(s.username) + "</div>" +
 
-        '<div class="balbig" style="color:' + balanceColor(s.balance) + '">' +
-          S.eur(s.balance) + "</div>" +
+        '<div class="balbig" style="color:' + balanceColor(s.balanceCents) + '">' +
+          S.esc(S.eur(s.balanceCents)) + "</div>" +
         '<div class="balsub">' +
-          (s.balance < S.LUNCH_PRICE
-            ? "Nestačí ani na jeden obed (" + S.eur(S.LUNCH_PRICE) + ")"
-            : "Vystačí na " + left + " " + obed(left) + " po " + S.eur(S.LUNCH_PRICE)) +
+          (Number(s.balanceCents) < S.LUNCH_PRICE_CENTS
+            ? "Nestačí ani na jeden obed (" + S.esc(S.eur(S.LUNCH_PRICE_CENTS)) + ")"
+            : "Vystačí na " + S.esc(left) + " " + S.esc(S.pluralObed(left)) +
+              " po " + S.esc(S.eur(S.LUNCH_PRICE_CENTS))) +
         "</div>" +
       "</div>" +
 
@@ -298,11 +249,7 @@ SKYRO.page(function (S, root) {
 
         /* Written out for the eye; the live region says the same thing for
            screen readers, so this carries no role of its own. */
-        (note
-          ? '<p class="note mt-s" role="status" style="font-weight:600;color:' +
-            (noteOk ? "var(--c-green)" : "var(--c-rose)") + '">' +
-            S.esc(note) + "</p>"
-          : "") +
+        noteHtml() +
 
         '<button type="button" class="btn soft block mt-s" id="toggle"' +
           (writing("toggle", s.id) ? ' disabled aria-busy="true"' : "") + ">" +
@@ -310,35 +257,30 @@ SKYRO.page(function (S, root) {
             ? pendingHtml()
             : S.icon(s.active ? "block" : "check_circle") +
               (s.active ? "Deaktivovať účet" : "Aktivovať účet")) + "</button>" +
-      "</div>" +
 
-      '<div class="plain">' +
-        '<div class="ph"><span class="pd">Posledné pohyby</span>' +
-          '<span class="pd">Účet od ' + S.esc(s.created) + "</span></div>" +
-        (rows.length === 0
-          ? '<p class="pempty"><b>Zatiaľ žiadne pohyby</b>' +
-            "Po prvom dobití alebo objednávke sa tu objaví záznam.</p>"
-          : rows.map(ledRow).join("")) +
+        '<p class="note mt-s">' +
+          (s.active
+            ? "Neaktívny účet si nemôže objednať obed. Kredit na ňom zostáva."
+            : "Kým je účet neaktívny, žiak si obed neobjedná.") + "</p>" +
       "</div>";
   }
 
-  /* ---------- painting ----------
-     One full write at startup, then three narrow ones. Rewriting the whole
-     page on every keystroke would take the caret out of the field being
-     typed into, so the search box and the amount field are never replaced
-     while they are in use. */
+  /* -------------------------------------------------------------- paint */
 
   function render() {
     root.innerHTML =
       S.pageHead("Žiaci", subtitle(),
-        '<button class="btn" type="button" id="new">' +
-          S.icon("person_add") + "Nový žiak</button>") +
+        /* One quiet line where the "Nový žiak" button used to be. There is no
+           endpoint that creates an account, so this says who does. */
+        '<p class="note" style="max-width:34ch;text-align:right">' +
+          "Nové účty zakladá správca školského systému. Tu sa spravuje kredit " +
+          "a prístup k obedom.</p>") +
 
       '<div class="split main-aside">' +
         '<div class="stack" id="left">' +
           '<div class="search">' + S.icon("search") +
             '<input id="q" type="text" autocomplete="off" aria-label="Hľadať žiaka"' +
-              ' placeholder="Hľadajte meno, e-mail alebo triedu" value="' + S.esc(q) + '">' +
+              ' placeholder="Hľadajte meno alebo používateľské meno" value="' + S.esc(q) + '">' +
           "</div>" +
           listHtml() +
         "</div>" +
@@ -347,7 +289,7 @@ SKYRO.page(function (S, root) {
       "</div>";
 
     sub = S.$("h1 + p", root); // pageHead gives the subtitle no id of its own
-    bindPage();
+    bindSearch();
     bindList();
     bindAside();
   }
@@ -356,7 +298,8 @@ SKYRO.page(function (S, root) {
     if (sub) sub.textContent = subtitle();
   }
 
-  /* Only the rows are rewritten; the search field above them keeps focus. */
+  /* Only the rows are rewritten; the search field above them keeps focus and
+     its caret. */
   function paintList() {
     var host = S.$("#left", root);
     var box = S.$(".search", host);
@@ -370,42 +313,45 @@ SKYRO.page(function (S, root) {
     bindAside();
   }
 
-  /* ---------- binding ---------- */
+  /* The magnifier becomes the pending glyph while a query is out. Swapping the
+     ligature in place is the one way to show it without replacing the input
+     the manager is typing into. */
+  function showSearching(on) {
+    var ic = S.$(".search .ms", root);
+    if (ic) ic.textContent = on ? "progress_activity" : "search";
+  }
 
-  function bindPage() {
-    S.$("#new", root).addEventListener("click", startCreate);
+  /* ------------------------------------------------------------ binding */
 
+  function bindSearch() {
     S.$("#q", root).addEventListener("input", function (e) {
       q = e.target.value;
-      paintList();
-
-      /* The result count is announced once the typing settles — a message per
-         keystroke would talk over the letters being typed. */
-      window.clearTimeout(announceTimer);
-      announceTimer = window.setTimeout(function () {
-        var n = matches().length;
-        S.announce(S.$("#live"), n === 0
-          ? "Nenašiel sa žiadny žiak."
-          : n + " " + (n === 1 ? "nájdený žiak" : n < 5 ? "nájdení žiaci" : "nájdených žiakov") + ".");
-      }, 500);
+      window.clearTimeout(searchTimer);
+      searchTimer = window.setTimeout(function () { runSearch(q); }, DEBOUNCE_MS);
     });
   }
 
   function bindList() {
     S.$$("#left .urow", root).forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        select(btn.getAttribute("data-id"));
-      });
+      btn.addEventListener("click", function () { select(btn.getAttribute("data-id")); });
     });
+
+    var retry = S.$("#search-retry", root);
+    if (retry) retry.addEventListener("click", function () { runSearch(q); });
   }
 
   function bindAside() {
-    if (creating) { bindCreate(); return; }
-    if (!selected()) return;
+    if (!sel) return;
 
     S.$$("#aside .qamt", root).forEach(function (btn) {
       btn.addEventListener("click", function () {
-        amount = btn.getAttribute("data-amt");
+        /* The shortcut fills the field it sits above rather than arming a
+           separate number, so what is credited is always what is on screen.
+           Its text comes from the table — cents are never divided back into
+           euros to make it. */
+        var item = quickByCents(Number(btn.getAttribute("data-cents")));
+        if (!item) return;
+        amount = item.text;
         syncAmount();
       });
     });
@@ -419,81 +365,91 @@ SKYRO.page(function (S, root) {
     S.$("#toggle", root).addEventListener("click", toggleActive);
   }
 
-  function bindCreate() {
-    var nameEl = S.$("#n", root);
-    var triedaEl = S.$("#tr", root);
-    var emailEl = S.$("#em", root);
-
-    S.$("#close", root).addEventListener("click", closeCreate);
-
-    nameEl.addEventListener("input", function (e) {
-      newName = e.target.value;
-      /* The school issues the address from the name — until someone types
-         their own, and from then on it is theirs. */
-      if (!emailEdited) {
-        newEmail = S.schoolEmail(newName);
-        emailEl.value = newEmail;
-      }
-      syncCreate();
-    });
-
-    triedaEl.addEventListener("input", function (e) {
-      newTrieda = e.target.value;
-      syncCreate();
-    });
-
-    emailEl.addEventListener("input", function (e) {
-      newEmail = e.target.value;
-      emailEdited = true;
-    });
-
-    S.$("#create", root).addEventListener("submit", function (e) {
-      e.preventDefault();
-      createStudent();
-    });
-  }
-
   /* The staged amount drives three things. Redrawing the panel to update them
      would pull the caret out of the field, so they are set in place. */
   function syncAmount() {
     var amt = S.$("#amt", root);
     if (amt && amt.value !== amount) amt.value = amount;
 
+    var cents = parsed();
     S.$$("#aside .qamt", root).forEach(function (btn) {
-      btn.setAttribute("aria-pressed", String(btn.getAttribute("data-amt") === amount));
+      btn.setAttribute("aria-pressed",
+        String(Number(btn.getAttribute("data-cents")) === cents));
     });
 
-    /* The button belongs to the write in flight; typing must not hand it
-       back before the server has answered. */
+    /* The button belongs to the write in flight; typing must not hand it back
+       before the server has answered. */
     var btn = S.$("#credit", root);
-    if (!btn || writing("credit", selId)) return;
+    if (!btn || writing("credit", sel && sel.id)) return;
 
-    var ok = validAmount();
-    btn.disabled = !ok;
+    btn.disabled = cents === null;
     btn.innerHTML = S.icon("add_card") + "Pripísať" +
-      (ok ? '<span class="qty">' + S.eur(parsed()) + "</span>" : "");
+      (cents === null ? "" : '<span class="qty">' + S.esc(S.eur(cents)) + "</span>");
   }
 
-  function syncCreate() {
-    if (writing("create")) return; // the submit button is waiting on the server
-    var make = S.$("#make", root);
-    if (make) make.disabled = !(newName.trim() && newTrieda.trim());
+  /* ------------------------------------------------------------- search */
+
+  /* Every reply carries the number of the request that asked for it. A slow
+     answer to "ni" arriving after the fast answer to "nina" is dropped, so the
+     rows always belong to the letters on screen. */
+  function runSearch(text) {
+    var seq = ++searchSeq;
+    showSearching(true);
+
+    S.api.students(text.trim()).then(
+      function (data) {
+        if (seq !== searchSeq) return;
+        showSearching(false);
+        searchErr = null;
+        list = (data && data.students) || [];
+
+        /* The freshest copy of the selected account is the one that just
+           arrived; adopt it rather than keeping ours beside it. */
+        var again = sel ? rowById(sel.id) : null;
+        if (again) sel = again;
+
+        paintHead();
+        paintList();
+        paintAside();
+        announceCount();
+      },
+      function (err) {
+        if (seq !== searchSeq) return;
+        showSearching(false);
+        searchErr = (err && err.message) || "Nastala chyba. Skúste to znova.";
+        list = [];
+        paintHead();
+        paintList();
+        S.announce(S.$("#live"), searchErr);
+      }
+    );
   }
 
-  /* ---------- actions ---------- */
+  /* Announced once the results land rather than per keystroke — a message per
+     letter would talk over the letters being typed. */
+  function announceCount() {
+    window.clearTimeout(announceTimer);
+    announceTimer = window.setTimeout(function () {
+      var n = list.length;
+      S.announce(S.$("#live"), n === 0
+        ? "Nenašiel sa žiadny žiak."
+        : n + " " + (n === 1 ? "nájdený žiak" : n < 5 ? "nájdení žiaci" : "nájdených žiakov") + ".");
+    }, 250);
+  }
 
-  /* THE FIX: a staged amount belongs to the student it was typed for. Moving
-     to another account clears it, and the status line with it, so 100 € armed
-     for one account can never be pressed onto the next one. */
+  /* ------------------------------------------------------------ actions */
+
   function select(id) {
     /* A write in flight belongs to the account it was started on. Letting the
        panel move to another name underneath it is exactly the bug this file
        opens with, so the list is inert for the moment the write takes. */
     if (busy) return;
 
-    selId = id;
-    creating = false;
-    amount = "";
+    var rec = rowById(id);
+    if (!rec) return;
+
+    sel = rec;
+    amount = "";   // a sum can only ever be credited to the student it was typed for
     note = "";
     noteOk = true;
 
@@ -501,185 +457,145 @@ SKYRO.page(function (S, root) {
     paintAside();
 
     /* paintList() replaced the row that was just clicked; put the keyboard
-       back on its successor. */
+       back on its successor. The id is compared, never spliced into a
+       selector — one quote in it and querySelector throws mid-click. */
     S.$$("#left .urow", root).forEach(function (btn) {
       if (btn.getAttribute("data-id") === id) btn.focus();
     });
   }
 
+  /* One ending for every failed write. err.message comes from the API layer
+     already in Slovak and already safe to show, so this page never invents
+     text for a refusal: the control comes back enabled and not one byte of
+     the list or the balance has moved. */
+  function fail(err, focusSel) {
+    busy = "";
+    busyId = "";
+    note = (err && err.message) || "Nastala chyba. Skúste to znova.";
+    noteOk = false;
+    paintAside();
+    var el = focusSel ? S.$(focusSel, root) : null;
+    if (el) el.focus();
+    S.announce(S.$("#live"), note);
+  }
+
   function credit() {
-    if (busy) return; // a write is already on its way; a second press is not a second charge
-    var s = selected();
-    if (!s || !validAmount()) return;
-    /* A deactivated account cannot order lunch, so putting money on it just
-       strands the money. Refuse, and say so. The server refuses it too — this
-       only saves the round trip. */
-    if (!s.active) {
-      note = "Účet je neaktívny — najprv ho aktivujte, potom pripíšte kredit.";
-      noteOk = false;
-      paintAside();
-      var refused = S.$("#credit", root);
-      if (refused) refused.focus();
-      S.announce(S.$("#live"), note);
-      return;
-    }
+    /* A write is already on its way. A second press is not a second charge:
+       it is dropped, never queued behind the first. */
+    if (busy) return;
+    if (!sel) return;
 
-    var value = parsed();
-    var id = s.id;
+    var cents = parsed();
+    if (cents === null) return;
 
+    var s = sel;
     busy = "credit";
-    busyId = id;
-    pending(S.$("#credit", root));
+    busyId = s.id;
+    note = "";
+    markPending(S.$("#credit", root));
 
-    S.api.creditStudent(id, value).then(function (resp) {
-      busy = "";
-      busyId = "";
+    S.api.topUp(s.id, cents).then(
+      function (resp) {
+        busy = "";
+        busyId = "";
 
-      /* The money is the server's arithmetic, not ours: the balance and the
-         ledger row — amount, label, timestamp, who did it — are copied out of
-         the response exactly as they came. */
-      var rec = applyStudent(resp && resp.student) || s;
-      if (resp && resp.entry) ledger.unshift(resp.entry);
-      var charged = resp && resp.entry && typeof resp.entry.amount === "number"
-        ? resp.entry.amount : value;
+        /* Emptied first, whatever the answer says: a request that may have
+           gone through must never leave a primed amount behind a button. */
+        amount = "";
 
-      /* Emptying the field disarms the button, so the same sum cannot be
-         credited twice by a second click. */
-      amount = "";
-      note = "Pripísané " + S.eur(charged) + " žiakovi " + rec.name + ".";
-      noteOk = true;
+        /* The money is the server's arithmetic. Without a balance in the
+           response there is nothing honest to draw, so the old number stays
+           and the line says the page can no longer vouch for it. */
+        if (!resp || typeof resp.balanceCents !== "number") {
+          note = "Server nepotvrdil nový zostatok. Obnovte stránku a skontrolujte účet.";
+          noteOk = false;
+          paintAside();
+          var back = S.$("#amt", root);
+          if (back) back.focus();
+          S.announce(S.$("#live"), note);
+          return;
+        }
 
-      paintHead();
-      paintList();
-      paintAside();
+        applyPatch(s.id, { balanceCents: resp.balanceCents });
+        note = "Kredit pripísaný. Nový zostatok " + S.eur(resp.balanceCents) + ".";
+        noteOk = true;
 
-      var amt = S.$("#amt", root);
-      if (amt) amt.focus(); // the button it was pressed on is disabled now
-      S.announce(S.$("#live"), note + " Nový zostatok " + S.eur(rec.balance) + ".");
-    }, function (err) {
-      /* No balance moved, no ledger row was written, and the typed amount is
-         still in the field to try again with. */
-      fail(err, "#credit");
-    });
+        paintHead();
+        paintList();
+        paintAside();
+
+        var amt = S.$("#amt", root);
+        if (amt) amt.focus(); // the button it was pressed on is disabled now
+        S.announce(S.$("#live"), note);
+      },
+      function (err) {
+        /* No balance moved, and the typed amount is still in the field to try
+           again with. */
+        fail(err, "#credit");
+      }
+    );
   }
 
   function toggleActive() {
     if (busy) return;
-    var s = selected();
-    if (!s) return;
+    if (!sel) return;
 
+    var s = sel;
     var next = !s.active;
 
     busy = "toggle";
     busyId = s.id;
-    pending(S.$("#toggle", root));
+    markPending(S.$("#toggle", root));
 
-    S.api.setStudentActive(s.id, next).then(function (resp) {
-      busy = "";
-      busyId = "";
+    S.api.setStudentActive(s.id, next).then(
+      function (resp) {
+        busy = "";
+        busyId = "";
 
-      /* The flag the list and the chip draw is the one that came back, never
-         the one that was asked for. */
-      var rec = applyStudent(resp && resp.student) || s;
+        /* The flag the list and the chip draw is the one that came back, never
+           the one that was asked for. */
+        if (!resp || typeof resp.active !== "boolean") {
+          note = "Server nepotvrdil stav účtu. Obnovte stránku a skontrolujte ho.";
+          noteOk = false;
+          paintAside();
+          var back = S.$("#toggle", root);
+          if (back) back.focus();
+          S.announce(S.$("#live"), note);
+          return;
+        }
 
-      /* A standing refusal was about the account as it was a moment ago — it
-         must not outlive the change. A green confirmation stands. */
-      if (!noteOk) { note = ""; noteOk = true; }
+        applyPatch(s.id, { active: resp.active });
 
-      paintHead();
-      paintList();
-      paintAside();
+        /* A standing refusal was about the account as it was a moment ago — it
+           must not outlive the change. A green confirmation stands. */
+        if (!noteOk) { note = ""; noteOk = true; }
 
-      var btn = S.$("#toggle", root);
-      if (btn) btn.focus(); // paintAside() replaced the button under us
-      S.announce(S.$("#live"), "Účet žiaka " + rec.name +
-        (rec.active ? " je aktívny." : " je neaktívny."));
-    }, function (err) {
-      /* The account is still whatever it was before the click. */
-      fail(err, "#toggle");
-    });
-  }
+        paintHead();
+        paintList();
+        paintAside();
 
-  function startCreate() {
-    if (busy) return;
-    creating = true;
-    newName = "";
-    newTrieda = "";
-    newEmail = "";
-    emailEdited = false;
-    amount = ""; // nothing stays armed behind a panel that is no longer shown
-    note = "";
-    noteOk = true;
-
-    paintAside();
-    S.$("#n", root).focus();
-  }
-
-  function closeCreate() {
-    if (busy) return;
-    creating = false;
-    paintAside();
-    S.$("#new", root).focus(); // back to the control that opened the form
-  }
-
-  function createStudent() {
-    if (busy) return;
-
-    var nm = newName.trim();
-    var tr = newTrieda.trim();
-    if (!nm || !tr) return;
-
-    var addr = newEmail.trim() || S.schoolEmail(nm);
-
-    /* The school address is the account's identity. Two accounts sharing one
-       means whichever is found first gets the credit. The server checks this
-       against every account, not just the ones on this screen — the check
-       here only saves the round trip. */
-    var wanted = addr.toLowerCase();
-    var clash = students.filter(function (x) { return x.email.toLowerCase() === wanted; })[0];
-    if (clash) {
-      note = "Účet s adresou " + wanted + " už existuje (" + clash.name + ").";
-      noteOk = false;
-      paintAside();
-      var dup = S.$("#em", root);
-      if (dup) dup.focus(); // the field that has to change is the address
-      S.announce(S.$("#live"), note);
-      return;
-    }
-
-    busy = "create";
-    busyId = "";
-    pending(S.$("#make", root));
-
-    S.api.createStudent({ name: nm, email: addr, trieda: tr }).then(function (resp) {
-      var fresh = resp && resp.student;
-      /* No account in the response means no account was created: say so
-         rather than putting a row in the list the server knows nothing of. */
-      if (!fresh || !fresh.id) { fail(null, "#make"); return; }
-
-      busy = "";
-      busyId = "";
-
-      /* The id, the address and the opening balance are the server's. */
-      students.unshift(Object.assign({}, fresh));
-      selId = fresh.id;
-      creating = false;
-      amount = "";
-      note = "Účet pre " + fresh.name + " je vytvorený. Kredit je zatiaľ nulový.";
-      noteOk = true;
-
-      paintHead();
-      paintList();
-      paintAside();
-
-      var amt = S.$("#amt", root);
-      if (amt) amt.focus(); // a new account starts empty; dobiť is next
-      S.announce(S.$("#live"), note);
-    }, function (err) {
-      /* The form stays open with everything still typed into it. */
-      fail(err, "#make");
-    });
+        var btn = S.$("#toggle", root);
+        if (btn) btn.focus(); // paintAside() replaced the button under us
+        S.announce(S.$("#live"), "Účet žiaka " + s.name +
+          (resp.active ? " je aktívny." : " je neaktívny."));
+      },
+      function (err) {
+        /* The account is still whatever it was before the click. */
+        fail(err, "#toggle");
+      }
+    );
   }
 
   render();
-});
+};
+
+/* The roster is the page: boot holds the spinner until it lands and shows its
+   own retry, in Slovak, if it does not. Every later list comes from the same
+   endpoint with a q on it. */
+page.load = function (S) {
+  return S.api.students().then(function (data) {
+    S.__students = (data && data.students) || [];
+  });
+};
+
+SKYRO.page(page);

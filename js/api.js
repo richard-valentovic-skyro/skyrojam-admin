@@ -1,18 +1,15 @@
-/* The single door between this app and a server.
+/* The single door between this app and the server.
 
-   NOTHING ELSE IN THE APP MAY FETCH. Page scripts read data from window.SKYRO
-   (filled by boot.js) and write through S.api.*. That is the whole contract.
+   NOTHING ELSE IN THE APP MAY FETCH. Pages call S.api.* and render what comes
+   back. Every method returns a Promise and resolves with the server's own view
+   of what happened — never with what we hoped would happen.
 
-   Until CONFIG.API_BASE is set this runs in MOCK MODE: every call resolves
-   against the fixtures in data.js, so the app works with no server at all.
-   Point CONFIG.API_BASE at a real API and the same calls go over the wire —
-   no page script changes.
+   Matches the backend spec: Bun + Elysia + Prisma. Money is integer cents
+   throughout. Ordering is by mealOnDayId. The server decides whether a day is
+   open; there is no deadline logic in this file or anywhere else on the client.
 
-   Every method returns a Promise. Writes resolve with the server's view of
-   what changed, so the caller re-renders from the response rather than
-   guessing what the server did.
-
-   See API.md for the wire format of every endpoint. */
+   With CONFIG.API_BASE empty this runs in MOCK MODE against the fixtures in
+   data.js, so the app works with no server at all. */
 window.SKYRO = window.SKYRO || {};
 (function (S) {
   "use strict";
@@ -36,44 +33,49 @@ window.SKYRO = window.SKYRO || {};
     } catch (e) { /* private mode — the session just will not persist */ }
   }
 
-  /* --------------------------------------------------------------- error */
+  /* -------------------------------------------------------------- errors */
 
-  /* One error shape for the whole app, so the UI never has to guess.
-     .status 0 means the request never reached the server. */
+  /* The server answers { error: CODE, message: "Slovak" }. Both are kept:
+     .code so the UI can react to SOLD_OUT or INSUFFICIENT_FUNDS specifically,
+     .message so it always has something honest to show. */
   function ApiError(status, code, message) {
     this.name = "ApiError";
     this.status = status;
-    this.code = code || "unknown";
-    this.message = message || "Nastala chyba. Skúste to znova.";
+    this.code = code || "UNKNOWN";
+    this.message = message || fallbackMessage(code, status);
   }
   ApiError.prototype = Object.create(Error.prototype);
 
-  /* Slovak, because this text reaches students. */
-  function messageFor(status) {
-    if (status === 0)   return "Nepodarilo sa spojiť so serverom. Skontrolujte pripojenie.";
-    if (status === 401) return "Prihlásenie vypršalo. Prihláste sa znova.";
-    if (status === 403) return "Na túto akciu nemáte oprávnenie.";
-    if (status === 404) return "Požadovaný údaj sa nenašiel.";
-    if (status === 409) return "Údaje sa medzitým zmenili. Obnovte stránku.";
-    if (status === 422) return "Zadané údaje nie sú platné.";
+  /* Used when the server sends a code with no message, or nothing at all.
+     Slovak, because this text reaches students. */
+  function fallbackMessage(code, status) {
+    switch (code) {
+      case "UNAUTHORIZED":        return "Prihlásenie vypršalo. Prihláste sa znova.";
+      case "FORBIDDEN":           return "Na túto akciu nemáte oprávnenie.";
+      case "NOT_FOUND":           return "Požadovaný údaj sa nenašiel.";
+      case "DEADLINE":            return "Objednávky na tento deň sú už uzavreté.";
+      case "SOLD_OUT":            return "Toto jedlo je už vypredané.";
+      case "INSUFFICIENT_FUNDS":  return "Na účte nie je dosť kreditu.";
+      case "VALIDATION":          return "Zadané údaje nie sú platné.";
+      default: break;
+    }
+    if (status === 0) return "Nepodarilo sa spojiť so serverom. Skontrolujte pripojenie.";
     if (status === 429) return "Priveľa pokusov. Skúste to o chvíľu.";
-    if (status >= 500)  return "Server má problém. Skúste to o chvíľu.";
+    if (status >= 500) return "Server má problém. Skúste to o chvíľu.";
     return "Nastala chyba. Skúste to znova.";
   }
 
-  /* -------------------------------------------------------------- request */
+  /* ------------------------------------------------------------- request */
 
   var TIMEOUT_MS = 15000;
 
   function request(method, path, body) {
-    var url = BASE + path;
     var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
     var timer = ctrl && window.setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS);
 
     var opts = {
       method: method,
       headers: { Accept: "application/json" },
-      credentials: "include",
       signal: ctrl ? ctrl.signal : undefined
     };
     if (token()) opts.headers.Authorization = "Bearer " + token();
@@ -82,182 +84,230 @@ window.SKYRO = window.SKYRO || {};
       opts.body = JSON.stringify(body);
     }
 
-    return window.fetch(url, opts).then(
+    return window.fetch(BASE + path, opts).then(
       function (res) {
         if (timer) window.clearTimeout(timer);
+
+        var type = res.headers.get("content-type") || "";
+        if (type.indexOf("text/csv") !== -1) return res.text();
         if (res.status === 204) return null;
+
         return res.text().then(function (text) {
           var data = null;
           try { data = text ? JSON.parse(text) : null; } catch (e) { /* not JSON */ }
           if (!res.ok) {
-            throw new ApiError(
-              res.status,
-              data && data.code,
-              (data && data.message) || messageFor(res.status)
-            );
+            /* An expired token is not this call's problem to report — send the
+               user back to sign in rather than showing a stale screen. */
+            if (res.status === 401) signOutLocal();
+            throw new ApiError(res.status, data && data.error, data && data.message);
           }
           return data;
         });
       },
       function () {
         if (timer) window.clearTimeout(timer);
-        throw new ApiError(0, "network", messageFor(0));
+        throw new ApiError(0, "NETWORK", fallbackMessage("NETWORK", 0));
       }
     );
+  }
+
+  function signOutLocal() {
+    setToken("");
+    if (S.session && S.session.clear) S.session.clear();
   }
 
   /* ----------------------------------------------------------- mock mode */
 
   function mock(value) {
     return new Promise(function (resolve) {
-      window.setTimeout(function () { resolve(value); }, 0);
+      window.setTimeout(function () { resolve(clone(value)); }, 0);
     });
   }
 
-  function clone(v) { return JSON.parse(JSON.stringify(v)); }
-
-  /* Idempotency keys let a retried write be de-duplicated by the server
-     instead of charging a student twice. No Date.now/random needed: a
-     counter plus the page load is unique enough for one session. */
-  var seq = 0;
-  function idempotencyKey(prefix) {
-    seq += 1;
-    return prefix + "-" + seq + "-" + (S.BOOT_ID || "0");
+  function fail(code, status) {
+    return Promise.reject(new ApiError(status || 400, code));
   }
 
-  /* ---------------------------------------------------------------- reads */
+  function clone(v) { return v == null ? v : JSON.parse(JSON.stringify(v)); }
 
-  /* One call fills everything a page could need. Cheap server-side, and it
-     means a page never has to orchestrate four requests. */
-  function bootstrap() {
+  /* ---------------------------------------------------------------- auth */
+
+  function login(username, password) {
     if (MOCK) {
+      var u = String(username).trim().toLowerCase();
+      var manager = S.MANAGERS.filter(function (m) { return m.username === u; })[0];
+      if (manager) return mock({ token: "mock-manager", account: manager });
+
+      var student = S.STUDENTS.filter(function (s) { return s.username === u; })[0];
+      if (!student) return fail("UNAUTHORIZED", 401);
+      if (!student.active) return fail("FORBIDDEN", 403);
       return mock({
-        me: clone(S.STUDENTS.filter(function (s) { return s.id === S.CURRENT_STUDENT_ID; })[0] || null),
-        staff: clone(S.STAFF),
-        price: S.LUNCH_PRICE,
-        meals: clone(S.MEALS),
-        week: clone(S.WEEK),
-        orders: clone(S.ORDERS),
-        posts: clone(S.POSTS),
-        conversations: clone(S.CONVS),
-        thread: clone(S.THREAD),
-        students: clone(S.STUDENTS),
-        ledger: clone(S.LEDGER)
+        token: "mock-student",
+        account: { id: student.id, name: student.name, username: student.username, role: "STUDENT" }
       });
     }
-    return request("GET", "/bootstrap");
+    return request("POST", "/auth/login", { username: username, password: password })
+      .then(function (res) {
+        if (res && res.token) setToken(res.token);
+        return res;
+      });
   }
 
-  /* ---------------------------------------------------------------- writes
-     Each one resolves with the server's view of what changed. In mock mode
-     they mutate the in-memory fixtures so the UI behaves correctly offline. */
+  function signOut() {
+    signOutLocal();
+    return Promise.resolve(null);
+  }
 
-  function placeOrder(date, mealId) {
+  /* -------------------------------------------------------------- student */
+
+  function me() {
+    if (MOCK) return mock(S.ME);
+    return request("GET", "/me");
+  }
+
+  function menuToday(date) {
+    if (MOCK) return mock(S.TODAY_MENU);
+    return request("GET", "/menu/today" + (date ? "?date=" + encodeURIComponent(date) : ""));
+  }
+
+  function menuWeek(monday) {
+    if (MOCK) return mock(S.WEEK_MENU);
+    return request("GET", "/menu/week" + (monday ? "?monday=" + encodeURIComponent(monday) : ""));
+  }
+
+  function myOrders() {
+    if (MOCK) return mock({ orders: S.MY_ORDERS });
+    return request("GET", "/orders");
+  }
+
+  function announcements() {
+    if (MOCK) return mock({ announcements: S.ANNOUNCEMENTS });
+    return request("GET", "/announcements");
+  }
+
+  /* Ordering. The server is the only thing that knows whether a day is open,
+     whether a meal is sold out and whether the balance covers it. */
+  function placeOrder(mealOnDayId) {
+    if (MOCK) return mockOrder(mealOnDayId, "create");
+    return request("POST", "/orders", { mealOnDayId: mealOnDayId });
+  }
+
+  function changeOrder(orderId, mealOnDayId) {
+    if (MOCK) return mockOrder(mealOnDayId, "change");
+    return request("PATCH", "/orders/" + encodeURIComponent(orderId), { mealOnDayId: mealOnDayId });
+  }
+
+  function cancelOrder(orderId) {
     if (MOCK) {
-      var me = S.STUDENTS.filter(function (s) { return s.id === S.CURRENT_STUDENT_ID; })[0];
-      /* One lunch per (student, date): a repeat is an UPDATE, never a second
-         debit. The server must enforce the same invariant. */
-      var already = S.LEDGER.some(function (l) { return l.orderDate === date; });
-      if (!already) {
-        me.balance = Number((me.balance - S.LUNCH_PRICE).toFixed(2));
-        S.LEDGER.unshift({
-          id: idempotencyKey("l"), studentId: me.id, orderDate: date,
-          amount: -S.LUNCH_PRICE, label: "Obed " + (mealId + 1), at: "teraz"
+      S.ME.balanceCents += S.LUNCH_PRICE_CENTS;
+      S.TODAY_MENU.myOrder = null;
+      S.TODAY_MENU.meals.forEach(function (m) { m.orderedByMe = false; });
+      return mock({ id: orderId, status: "CANCELLED" });
+    }
+    return request("DELETE", "/orders/" + encodeURIComponent(orderId));
+  }
+
+  /* Mock ordering, enforcing the same rules the server will: capacity,
+     balance, and one order per day (a change is a swap, never a second debit). */
+  function mockOrder(mealOnDayId, kind) {
+    var day = S.TODAY_MENU;
+    var meal = day.meals.filter(function (m) { return m.mealOnDayId === mealOnDayId; })[0];
+    if (!meal) return fail("NOT_FOUND", 404);
+    if (!day.day.open) return fail("DEADLINE", 409);
+    if (meal.capacity > 0 && meal.orderCount >= meal.capacity) return fail("SOLD_OUT", 409);
+
+    var charging = kind === "create";
+    if (charging && S.ME.balanceCents < S.LUNCH_PRICE_CENTS) return fail("INSUFFICIENT_FUNDS", 402);
+
+    /* A change releases the old seat and takes the new one; no money moves. */
+    if (day.myOrder) {
+      var old = day.meals.filter(function (m) { return m.mealOnDayId === day.myOrder.mealOnDayId; })[0];
+      if (old) { old.orderCount = Math.max(0, old.orderCount - 1); old.orderedByMe = false; }
+    }
+    if (charging) S.ME.balanceCents -= S.LUNCH_PRICE_CENTS;
+
+    meal.orderCount += 1;
+    meal.orderedByMe = true;
+    day.myOrder = {
+      id: "ord_mock",
+      mealOnDayId: meal.mealOnDayId,
+      slot: meal.slot,
+      status: "ORDERED",
+      meal: { name: meal.name, category: meal.category, icon: meal.icon }
+    };
+    return mock({ id: "ord_mock", status: "ORDERED" });
+  }
+
+  /* -------------------------------------------------------------- manager */
+
+  function students(q) {
+    if (MOCK) {
+      var list = S.STUDENTS;
+      if (q) {
+        var n = String(q).toLowerCase();
+        list = list.filter(function (s) {
+          return s.name.toLowerCase().indexOf(n) !== -1 || s.username.toLowerCase().indexOf(n) !== -1;
         });
       }
-      return mock({ balance: me.balance, mealId: mealId, date: date, charged: !already });
+      return mock({ students: list });
     }
-    return request("POST", "/orders", {
-      date: date, mealId: mealId, idempotencyKey: idempotencyKey("order")
-    });
+    return request("GET", "/students" + (q ? "?q=" + encodeURIComponent(q) : ""));
   }
 
-  function cancelOrder(date) {
-    if (MOCK) return mock({ date: date, cancelled: true });
-    return request("DELETE", "/orders/" + encodeURIComponent(date));
-  }
-
-  function creditStudent(studentId, amount) {
+  function setStudentActive(id, active) {
     if (MOCK) {
-      var s = S.STUDENTS.filter(function (x) { return x.id === studentId; })[0];
-      if (!s) return Promise.reject(new ApiError(404, "not_found", messageFor(404)));
-      s.balance = Number((s.balance + amount).toFixed(2));
-      var entry = {
-        id: idempotencyKey("l"), studentId: studentId, amount: amount,
-        label: "Dobitie kreditu", at: "teraz", by: "Katarína Vrábľová"
-      };
-      S.LEDGER.unshift(entry);
-      return mock({ student: clone(s), entry: clone(entry) });
+      var s = S.STUDENTS.filter(function (x) { return x.id === id; })[0];
+      if (!s) return fail("NOT_FOUND", 404);
+      s.active = active;
+      return mock({ id: id, active: active });
     }
-    return request("POST", "/admin/students/" + encodeURIComponent(studentId) + "/credit", {
-      amount: amount, idempotencyKey: idempotencyKey("credit")
-    });
+    return request("PATCH", "/students/" + encodeURIComponent(id), { active: active });
   }
 
-  function createStudent(data) {
+  function topUp(id, amountCents) {
     if (MOCK) {
-      var s = {
-        id: idempotencyKey("s"), name: data.name, email: data.email,
-        trieda: data.trieda, balance: 0, active: true, created: "dnes"
-      };
-      S.STUDENTS.unshift(s);
-      return mock({ student: clone(s) });
+      var s = S.STUDENTS.filter(function (x) { return x.id === id; })[0];
+      if (!s) return fail("NOT_FOUND", 404);
+      if (!(amountCents > 0)) return fail("VALIDATION", 400);
+      s.balanceCents += amountCents;
+      if (s.id === S.ME.id) S.ME.balanceCents = s.balanceCents;
+      return mock({ id: id, balanceCents: s.balanceCents });
     }
-    return request("POST", "/admin/students", data);
+    return request("POST", "/students/" + encodeURIComponent(id) + "/topup", { amountCents: amountCents });
   }
 
-  function setStudentActive(studentId, active) {
+  function kitchenOrders(opts) {
+    opts = opts || {};
     if (MOCK) {
-      var s = S.STUDENTS.filter(function (x) { return x.id === studentId; })[0];
-      if (s) s.active = active;
-      return mock({ student: clone(s) });
+      return mock({ date: opts.date || S.TODAY_MENU.day.key, count: S.KITCHEN_ORDERS.length, orders: S.KITCHEN_ORDERS });
     }
-    return request("PATCH", "/admin/students/" + encodeURIComponent(studentId), { active: active });
+    var q = [];
+    if (opts.date) q.push("date=" + encodeURIComponent(opts.date));
+    if (opts.status) q.push("status=" + encodeURIComponent(opts.status));
+    if (opts.format) q.push("format=" + encodeURIComponent(opts.format));
+    return request("GET", "/orders" + (q.length ? "?" + q.join("&") : ""));
   }
 
-  function publishMenu(date, meals) {
-    if (MOCK) return mock({ date: date, meals: clone(meals), published: true });
-    return request("PUT", "/admin/menu/" + encodeURIComponent(date), { meals: meals });
+  function serveOrder(id) {
+    if (MOCK) {
+      var o = S.KITCHEN_ORDERS.filter(function (x) { return x.id === id; })[0];
+      if (!o) return fail("NOT_FOUND", 404);
+      o.status = "SERVED";
+      return mock({ id: id, status: "SERVED" });
+    }
+    return request("POST", "/orders/" + encodeURIComponent(id) + "/serve");
   }
 
   function postAnnouncement(data) {
     if (MOCK) {
-      var post = { t: data.title, b: data.body, imp: !!data.important, m: "teraz, Katarína Vrábľová" };
-      S.POSTS.unshift(post);
-      return mock({ post: clone(post) });
+      var a = {
+        id: "a_mock", title: data.title, body: data.body,
+        important: !!data.important, author: "Katarína Vrábľová", createdAt: "teraz"
+      };
+      S.ANNOUNCEMENTS.unshift(a);
+      return mock({ id: a.id });
     }
-    return request("POST", "/admin/announcements", data);
-  }
-
-  function sendMessage(conversationId, text) {
-    if (MOCK) {
-      return mock({ message: { kind: "msg", from: "me", text: text, at: "teraz" } });
-    }
-    return request("POST", "/conversations/" + encodeURIComponent(conversationId) + "/messages", {
-      text: text, idempotencyKey: idempotencyKey("msg")
-    });
-  }
-
-  /* ----------------------------------------------------------------- auth */
-
-  function requestLoginLink(email) {
-    if (MOCK) return mock({ requested: true });
-    return request("POST", "/auth/request-link", { email: email });
-  }
-
-  /* Exchanges the token from the emailed link for a session. */
-  function verifyLoginToken(t) {
-    if (MOCK) return mock({ token: "mock", user: null });
-    return request("POST", "/auth/verify", { token: t }).then(function (r) {
-      if (r && r.token) setToken(r.token);
-      return r;
-    });
-  }
-
-  function signOut() {
-    setToken("");
-    if (MOCK) return mock(null);
-    return request("POST", "/auth/sign-out");
+    return request("POST", "/announcements", data);
   }
 
   S.api = {
@@ -268,19 +318,23 @@ window.SKYRO = window.SKYRO || {};
     setToken: setToken,
     request: request,
 
-    bootstrap: bootstrap,
+    login: login,
+    signOut: signOut,
 
+    me: me,
+    menuToday: menuToday,
+    menuWeek: menuWeek,
+    myOrders: myOrders,
+    announcements: announcements,
     placeOrder: placeOrder,
+    changeOrder: changeOrder,
     cancelOrder: cancelOrder,
-    creditStudent: creditStudent,
-    createStudent: createStudent,
-    setStudentActive: setStudentActive,
-    publishMenu: publishMenu,
-    postAnnouncement: postAnnouncement,
-    sendMessage: sendMessage,
 
-    requestLoginLink: requestLoginLink,
-    verifyLoginToken: verifyLoginToken,
-    signOut: signOut
+    students: students,
+    setStudentActive: setStudentActive,
+    topUp: topUp,
+    kitchenOrders: kitchenOrders,
+    serveOrder: serveOrder,
+    postAnnouncement: postAnnouncement
   };
 })(window.SKYRO);

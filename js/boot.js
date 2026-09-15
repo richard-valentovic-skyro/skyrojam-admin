@@ -41,24 +41,6 @@ window.SKYRO = window.SKYRO || {};
       "</div>";
   }
 
-  /* Everything the payload carries, mapped onto the globals page scripts
-     already read. Keys the server omits leave the fixture in place. */
-  function apply(payload) {
-    if (!payload) return;
-    var map = {
-      meals: "MEALS", week: "WEEK", orders: "ORDERS", posts: "POSTS",
-      conversations: "CONVS", thread: "THREAD", students: "STUDENTS",
-      ledger: "LEDGER", staff: "STAFF"
-    };
-    Object.keys(map).forEach(function (k) {
-      if (payload[k] !== undefined && payload[k] !== null) S[map[k]] = payload[k];
-    });
-    if (payload.price !== undefined) S.LUNCH_PRICE = payload.price;
-    if (payload.me && payload.me.id) S.CURRENT_STUDENT_ID = payload.me.id;
-    if (payload.me && payload.me.name && S.APP) S.APP.account = payload.me.name;
-    S.TOTAL_TODAY = (S.MEALS || []).reduce(function (a, m) { return a + (m.c || 0); }, 0);
-  }
-
   function run(root) {
     try {
       pageFn(S, root);
@@ -78,11 +60,14 @@ window.SKYRO = window.SKYRO || {};
 
     root.innerHTML = loadingHtml();
 
-    S.api.bootstrap().then(
-      function (payload) {
-        apply(payload);
-        run(root);
-      },
+    /* There is no single bootstrap call any more — the API exposes /me,
+       /menu/today, /menu/week, /orders and /announcements separately. A page
+       declares what it needs by returning a Promise from its own loader; boot
+       shows the spinner until it settles and the retry if it does not. */
+    var ready = pageFn.load ? pageFn.load(S) : Promise.resolve(null);
+
+    Promise.resolve(ready).then(
+      function () { run(root); },
       function (err) {
         root.innerHTML = errorHtml(err);
         var retry = S.$("#boot-retry");

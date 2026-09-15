@@ -1,9 +1,10 @@
-/* Compose a notice, with the student's feed card rendered live beside it.
+/* Nový oznam — compose a notice, with the student's feed card rendered live
+   beside it.
 
    The preview is the real thing: the same .post markup, the same "Dôležité"
-   chip, the same violet edge the students get. Writing it twice would let the
-   two drift, so the card here is built from the same pieces as the student
-   feed and nothing about it is a mock-up.
+   chip, the same violet edge the students get on their Oznamy page. Writing
+   the card twice would let the two drift, so it is built from the same pieces
+   and nothing about it is a mock-up.
 
    Why the page is not re-rendered on every keystroke: an innerHTML write
    replaces the <input> and the <textarea> under the cursor, which drops the
@@ -12,36 +13,33 @@
    in place for the same reason — the CSS reads that attribute, so the switch
    animates off the accessible state rather than off a second class.
 
-   Both fields are named by a real <label for>. The React build had that right;
-   what it did not have was a single handler behind "Publikovať oznam",
-   "Uložiť ako koncept" or "Zahodiť" — three buttons that answered nothing at
-   all.
-
-   "Publikovať oznam" now goes through S.api.postAnnouncement, and the two
-   rules that follow from that are the whole of the write path:
+   "Publikovať oznam" goes through S.api.postAnnouncement, and two rules follow
+   from that:
 
    1. NOTHING IS CLEARED UNTIL THE SERVER SAYS SO. The form is emptied inside
-      the success handler, out of the post the response carried back — never
-      up front, and never out of what we sent. A failed publish leaves every
-      character the user typed exactly where it was, with err.message under
-      the buttons, so the fix is one more click and not one more retyping.
+      the success handler. A failed publish leaves every character the user
+      typed exactly where it was, with err.message under the button, so the fix
+      is one more click and not one more retyping.
 
    2. AN EMPTY NOTICE NEVER REACHES THE NETWORK. The old build announced a
       successful publish for a form containing nothing but spaces. The check
       happens here, before the request, and says so in the same status line.
 
-   "Uložiť ako koncept" has no endpoint behind it, so it is disabled and
-   labelled "Zatiaľ nedostupné" rather than left looking live and doing
-   nothing. "Zahodiť" really does empty the form it offers to throw away. */
-SKYRO.page(function (S, root) {
+   "Uložiť ako koncept" is gone. There is no draft endpoint in the spec, and a
+   button that is permanently disabled is still a button taking up room for
+   something the product cannot do. "Zahodiť" stays, because it really does
+   empty the form it offers to throw away. */
+var page = function (S, root) {
   "use strict";
 
-  var AUTHOR = "Katarína Vrábľová";
+  /* The notice is published as whoever is signed in; the session holds the
+     account the server authenticated at sign-in. */
+  var AUTHOR = (S.session && S.session.get() && S.session.get().name) ||
+    (S.APP && S.APP.account) || "Školská jedáleň";
 
-  var title = "Uzávierka objednávok sa mení na 14:00";
-  var body = "Od pondelka 21. septembra sa objednávky na nasledujúci deň " +
-    "uzatvárajú o 14:00 namiesto 15:30. Platí pre všetky ročníky.";
-  var important = true;
+  var title = "";
+  var body = "";
+  var important = false;
 
   /* A write is in flight, and what the last one had to say. Both are rendered
      out of state, so a render that happens mid-write — Zahodiť, say — still
@@ -49,16 +47,11 @@ SKYRO.page(function (S, root) {
   var saving = false;
   var status = null; // { ok: Boolean, text: String }
 
-  /* The boot spinner, shrunk to sit on one line of a button. Reusing the class
-     keeps it inside the prefers-reduced-motion rule that already slows it. */
-  function spinner() {
-    return '<span class="boot-spin" aria-hidden="true"' +
-      ' style="width:14px;height:14px;border-width:2px;flex:none"></span>';
-  }
+  /* ------------------------------------------------------------- markup */
 
   function publishLabel() {
     return saving
-      ? spinner() + "Ukladá sa…"
+      ? S.icon("progress_activity") + "Ukladá sa…"
       : S.icon("send") + "Publikovať oznam";
   }
 
@@ -90,18 +83,22 @@ SKYRO.page(function (S, root) {
         '<div class="stack l" style="max-width:720px">' +
           "<div>" +
             '<label class="flabel" for="t">Nadpis</label>' +
-            '<input class="finput" id="t" type="text" value="' + S.esc(title) + '">' +
+            '<input class="finput" id="t" type="text" autocomplete="off"' +
+              ' placeholder="Napríklad Vo štvrtok sa vydáva až od 12:20"' +
+              ' value="' + S.esc(title) + '">' +
           "</div>" +
 
           "<div>" +
             '<label class="flabel" for="b">Text oznamu</label>' +
-            '<textarea class="finput" id="b">' + S.esc(body) + "</textarea>" +
+            '<textarea class="finput" id="b"' +
+              ' placeholder="Napíšte, čoho sa oznam týka a koho sa dotkne.">' +
+              S.esc(body) + "</textarea>" +
           "</div>" +
 
           '<button class="toggle" type="button" id="imp" aria-pressed="' + important + '">' +
             '<span class="tl"><span class="tt">Označiť ako dôležité</span>' +
             '<span class="ts">Dôležitý oznam sa zobrazí navrchu feedu s fialovým' +
-              " okrajom a pošle notifikáciu.</span></span>" +
+              " okrajom a výraznou značkou.</span></span>" +
             '<span class="sw"></span>' +
           "</button>" +
 
@@ -109,14 +106,12 @@ SKYRO.page(function (S, root) {
             '<button class="btn" type="button" id="publish"' +
               (saving ? ' disabled aria-busy="true"' : "") + ">" +
               publishLabel() + "</button>" +
-            /* No endpoint exists for a draft. Disabled and named, rather than
-               a live-looking button that swallows the click. */
-            '<button class="btn soft" type="button" id="draft" disabled' +
-              ' title="Zatiaľ nedostupné">' +
-              S.icon("schedule") + "Uložiť ako koncept</button>" +
           "</div>" +
 
           statusHtml() +
+
+          '<p class="note">Oznam uvidia všetci žiaci na stránke Oznamy hneď po ' +
+            "publikovaní. Upraviť ani stiahnuť sa odtiaľto zatiaľ nedá.</p>" +
         "</div>" +
 
         /* Live preview, in the exact card the students will see. */
@@ -156,6 +151,8 @@ SKYRO.page(function (S, root) {
     if (old && old.parentNode) old.parentNode.removeChild(old);
   }
 
+  /* ------------------------------------------------------------ binding */
+
   function bind() {
     var titleInput = S.$("#t", root);
     var bodyInput = S.$("#b", root);
@@ -187,55 +184,18 @@ SKYRO.page(function (S, root) {
     }
 
     var publish = S.$("#publish", root);
-    if (publish) {
-      publish.addEventListener("click", function () {
-        /* A second click while the first request is still open is dropped,
-           not queued. One click must never publish two notices. */
-        if (saving) return;
+    if (publish) publish.addEventListener("click", submit);
 
-        /* Refused here, before the network: a notice made of spaces is not a
-           notice, and the old build confirmed one anyway. */
-        if (!title.trim() || !body.trim()) {
-          status = { ok: false, text: "Zadajte nadpis a text oznamu." };
-          render("#publish"); // role="alert" reads the line out by itself
-          return;
-        }
-
-        saving = true;
-        status = null;
-        markBusy();
-
-        S.api.postAnnouncement({ title: title, body: body, important: important }).then(
-          function (res) {
-            var post = (res && res.post) || {};
-            var published = post.t || title;
-
-            saving = false;
-            /* Confirmed, so the form may be emptied — and the sentence the
-               user reads is built from the response, not from what we sent. */
-            title = "";
-            body = "";
-            important = false;
-            status = { ok: true, text: "Oznam „" + published + "“ bol publikovaný." };
-            render("#publish");
-            S.announce(S.$("#live"), "Oznam „" + published + "“ bol publikovaný. Formulár je prázdny.");
-          },
-          function (err) {
-            /* Nothing was published, so nothing on the page moves: the form
-               still holds exactly what was typed, ready for a second try. */
-            saving = false;
-            status = { ok: false, text: (err && err.message) || "Nastala chyba. Skúste to znova." };
-            render("#publish");
-          }
-        );
-      });
-    }
-
-    /* Zahodiť empties the form for real — announcing that a draft was thrown
+    /* Zahodiť empties the form for real — announcing that a notice was thrown
        away while its text is still on screen would be a lie. */
     var discard = S.$(".iconbtn", root);
     if (discard) {
       discard.addEventListener("click", function () {
+        if (saving) return;
+        if (!title && !body && !important) {
+          S.announce(S.$("#live"), "Formulár je prázdny.");
+          return;
+        }
         title = "";
         body = "";
         important = false;
@@ -246,5 +206,71 @@ SKYRO.page(function (S, root) {
     }
   }
 
+  /* -------------------------------------------------------------- write */
+
+  function submit() {
+    /* A second click while the first request is still open is dropped, not
+       queued. One click must never publish two notices. */
+    if (saving) return;
+
+    var t = title.trim();
+    var b = body.trim();
+
+    /* Refused here, before the network: a notice made of spaces is not a
+       notice, and the old build confirmed one anyway. */
+    if (!t || !b) {
+      status = { ok: false, text: "Zadajte nadpis aj text oznamu." };
+      render(!t ? "#t" : "#b"); // role="alert" reads the line out by itself
+      return;
+    }
+
+    saving = true;
+    status = null;
+    markBusy();
+
+    S.api.postAnnouncement({ title: t, body: b, important: important }).then(
+      function (resp) {
+        saving = false;
+
+        /* The API answers with the id of what it stored and nothing else, so
+           the sentence names the notice from what was confirmed sent — after
+           the server agreed to it, never before. */
+        if (!resp || !resp.id) {
+          status = { ok: false, text: "Server nepotvrdil publikovanie. Skontrolujte stránku Oznamy." };
+          render("#publish");
+          S.announce(S.$("#live"), status.text);
+          return;
+        }
+
+        /* Confirmed, so the form may be emptied. */
+        title = "";
+        body = "";
+        important = false;
+        status = { ok: true, text: "Oznam „" + t + "“ bol publikovaný." };
+        render("#publish");
+        S.announce(S.$("#live"), "Oznam „" + t + "“ bol publikovaný. Formulár je prázdny.");
+      },
+      /* Two-argument then rather than .catch(): a bug thrown while rendering
+         a success must not reach the user dressed as a refused publish. */
+      function (err) {
+        /* Nothing was published, so nothing on the page moves: the form still
+           holds exactly what was typed, ready for a second try. */
+        saving = false;
+        status = { ok: false, text: (err && err.message) || "Nastala chyba. Skúste to znova." };
+        render("#publish");
+      }
+    );
+  }
+
   render();
-});
+};
+
+/* Nothing to fetch: the composer starts empty and the preview is drawn from
+   what is typed. The loader exists so this page boots through the same path
+   as every other one — spinner, then render — instead of being a special
+   case. */
+page.load = function () {
+  return Promise.resolve(null);
+};
+
+SKYRO.page(page);

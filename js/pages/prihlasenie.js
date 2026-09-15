@@ -1,4 +1,4 @@
-/* Prihlásenie — username and password.
+/* Prihlásenie do administrácie — username and password.
 
    Apple's restraint: a centred column, light display type, fields that stand
    directly on the ground with no card or panel, and one field carrying its
@@ -6,30 +6,42 @@
 
    NO PASSWORD IS EVER CHECKED IN THE BROWSER. That would be theatre — anyone
    can read this file. The password is collected, checked only for being
-   present, and handed to the server. The local checks below exist to catch
-   typos before a round trip, nothing more.
+   present, and handed to POST /auth/login through S.api.login. The local
+   checks below exist to catch typos before a round trip, nothing more: who
+   exists, whose password is right and who is staff are all answers only the
+   server is allowed to give.
 
-   Until CONFIG.API_BASE is set this runs in mock mode: the local checks decide
-   everything and a visible notice says so, because a sign-in screen that
-   appears to accept a password it never verified would be a lie. */
+   THERE IS NO PASSWORD RESET. The backend implements no reset endpoint, so
+   the screen does not offer one — a "Zabudli ste heslo?" link that leads
+   nowhere is worse than no link. The help panel says who to ask instead.
+
+   ROLE. This app moves money and creates accounts, so a student account is
+   refused at the door: the server hands back the account it authenticated,
+   and anything that is not a MANAGER has its session dropped again
+   immediately, before a single admin screen is drawn. That refusal is a
+   courtesy to the person standing there, not a security control — the real
+   one is the API rejecting every manager endpoint for a student token, plus
+   Cloudflare Access in front of this whole folder.
+
+   Until CONFIG.API_BASE is set this runs in mock mode against the fixtures in
+   data.js: the username has to exist in the roster, the password is not
+   verified at all, and a visible notice says so — a sign-in screen that
+   appeared to accept a password it never checked would be a lie. */
 SKYRO.pageWithoutShell(function (S) {
   "use strict";
 
   var REMEMBER_KEY = "skyro.admin.username";
-  var RESEND_SECONDS = 30;
   var HOME = "index.html";
 
-  var step = "signin"; // "signin" | "reset" | "sent"
+
   var username = "";
   var password = "";
-  /* Off unless this device has been remembered before. School computers are
-     shared, so opting in has to be deliberate. */
+  /* Off unless this device has been remembered before. Staff computers in a
+     canteen are shared too, so opting in has to be deliberate. */
   var remember = false;
   var peek = false;
   var error = "";
   var helpOpen = false;
-  var cooldown = 0;
-  var timer = null;
   var busy = false; // a request is in flight; a second submit is ignored
 
   var host = S.$("#page-content");
@@ -54,8 +66,11 @@ SKYRO.pageWithoutShell(function (S) {
 
   /* -------------------------------------------------------------- checks */
 
-  /* Cheap local refusals. Returns a message, or "" to let the request through.
-     The server re-checks all of this; none of it is security. */
+  /* Cheap local refusals, and the complete list of them: present, not an
+     email, shaped like a username, password present. Everything else — is
+     this account real, is the password right, is this person staff — is the
+     server's to answer, and is never guessed here.
+     Returns a message, or "" to let the request through. */
   function localSignInProblem(u, p) {
     var v = String(u).trim().toLowerCase();
     if (!v) return "Zadajte používateľské meno.";
@@ -64,86 +79,53 @@ SKYRO.pageWithoutShell(function (S) {
       return "Používateľské meno môže obsahovať len písmená, číslice, bodku, pomlčku a podčiarkovník.";
     }
     if (!p) return "Zadajte heslo.";
-
-    /* Mock mode only: without a server, the roster is the only thing that can
-       answer. Once the API is live the server decides and this is skipped. */
-    if (S.api.mock) {
-      var staff = S.STAFF.filter(function (m) { return S.usernameOf(m.email) === v; })[0];
-      if (!staff) {
-        /* A pupil typing their own name here deserves a straight answer; it
-           reveals nothing they do not already know about themselves. */
-        var isStudent = S.STUDENTS.some(function (x) { return S.usernameOf(x.email) === v; });
-        return isStudent
-          ? "Toto je žiacke konto. Do administrácie sa prihlasuje len personál jedálne."
-          : "Nesprávne používateľské meno alebo heslo.";
-      }
-    }
-    return "";
-  }
-
-  function localResetProblem(u) {
-    var v = String(u).trim().toLowerCase();
-    if (!v) return "Zadajte používateľské meno.";
-    if (!S.looksLikeUsername(v)) return "Zadajte platné používateľské meno.";
     return "";
   }
 
   /* ------------------------------------------------------------- network
-     Both resolve with "" on success or the message to show. Never reject. */
+     Resolves with "" on success or with the message to show. Never rejects:
+     the caller has one job, which is to decide between "go" and "say this".
 
-  /* The server MUST answer a wrong password and an unknown username
-     identically, or this screen becomes a way to discover who has an account. */
+     The server MUST answer a wrong password and an unknown username
+     identically, or this screen becomes a way to discover who has an account.
+     S.api.login stores the token; the only thing left to do here is to check
+     the role, hand the returned account to the session and leave. */
   function submitSignIn(u, p) {
     var local = localSignInProblem(u, p);
     if (local) return Promise.resolve(local);
-    if (S.api.mock) return Promise.resolve("");
 
-    return S.api
-      .request("POST", "/auth/sign-in", { username: String(u).trim().toLowerCase(), password: p })
-      .then(function (res) {
-        if (res && res.token) S.api.setToken(res.token);
-        S.session.set((res && res.user) || { username: String(u).trim().toLowerCase() });
+    return S.api.login(String(u).trim().toLowerCase(), p).then(
+      function (res) {
+        var account = res && res.account;
+        if (!account) return "Prihlásenie zlyhalo. Skúste to znova.";
+
+        /* Authenticated, but not staff. The token is thrown away again
+           rather than left lying in storage for the next page load, and the
+           message says what happened without pretending the credentials
+           were wrong. */
+        if (account.role !== "MANAGER") {
+          return S.api.signOut().then(function () {
+            return "Toto konto nemá prístup do administrácie.";
+          });
+        }
+
+        /* The account the server authenticated, not the one we typed. */
+        S.session.set(account);
         return "";
-      })
-      .catch(function (e) {
-        return (e && e.message) || "Prihlásenie zlyhalo. Skúste to znova.";
-      });
-  }
-
-  /* Answers 202 whether or not the account exists, so this cannot be used to
-     enumerate usernames. */
-  function submitReset(u) {
-    var local = localResetProblem(u);
-    if (local) return Promise.resolve(local);
-    if (S.api.mock) return Promise.resolve("");
-
-    return S.api
-      .request("POST", "/auth/request-reset", { username: String(u).trim().toLowerCase() })
-      .then(function () { return ""; })
-      .catch(function (e) { return (e && e.message) || "Nepodarilo sa odoslať odkaz."; });
+      },
+      function (err) {
+        /* A 401 is answered with one fixed sentence, never the server's own
+           wording: "unknown username" and "wrong password" have to be
+           indistinguishable here, or this screen becomes a way to find out
+           who has an account. Every other failure shows what the server
+           said, which is already Slovak and already honest. */
+        if (err && err.status === 401) return "Nesprávne používateľské meno alebo heslo.";
+        return (err && err.message) || "Prihlásenie zlyhalo. Skúste to znova.";
+      }
+    );
   }
 
   /* -------------------------------------------------------------- pieces */
-
-  function startCooldown() {
-    cooldown = RESEND_SECONDS;
-    if (timer) window.clearInterval(timer);
-    timer = window.setInterval(function () {
-      cooldown -= 1;
-      var b = S.$("#resend");
-      if (cooldown <= 0) {
-        window.clearInterval(timer);
-        timer = null;
-        if (b) { b.disabled = false; b.innerHTML = "Poslať znova"; }
-      } else if (b) {
-        b.innerHTML = 'Poslať znova <span class="acount">' + cooldown + " s</span>";
-      }
-    }, 1000);
-  }
-
-  function stopCooldown() {
-    if (timer) { window.clearInterval(timer); timer = null; }
-  }
 
   function errorHtml() {
     return error ? '<p class="aerr" id="err" role="alert">' + S.esc(error) + "</p>" : "";
@@ -152,8 +134,8 @@ SKYRO.pageWithoutShell(function (S) {
   var HELP =
     "<p><b>Aké je moje meno?</b> Je to vaša školská adresa bez @skyro.ai — " +
       "napríklad <b>meno.priezvisko</b>. Prihlásiť sa môže len personál jedálne.</p>" +
-    "<p><b>Nepamätáte si heslo?</b> Použite <b>Zabudli ste heslo?</b> a pošleme " +
-      "vám odkaz na jeho zmenu.</p>" +
+    "<p><b>Nepamätáte si heslo?</b> Nové heslo nastavuje vedúca jedálne alebo " +
+      "správca systému — odkaz na zmenu hesla e-mailom neposielame.</p>" +
     "<p><b>Stále to nejde?</b> Obráťte sa na správcu systému.</p>";
 
   function helpHtml() {
@@ -165,12 +147,14 @@ SKYRO.pageWithoutShell(function (S) {
   function protoHtml() {
     if (!S.api.mock) return "";
     return '<p class="aproto"><b>Ukážka bez servera.</b> Heslo sa zatiaľ nikde ' +
-      "neoveruje — šípka vás pustí priamo do aplikácie.</p>";
+      "neoveruje" +
+      "." +
+      "</p>";
   }
 
-  /* --------------------------------------------------------------- steps */
+  /* --------------------------------------------------------------- form */
 
-  function stepSignIn() {
+  function formHtml() {
     var ready = username.trim() && password;
     return '<form id="form" novalidate>' +
         '<div class="astack">' +
@@ -195,7 +179,12 @@ SKYRO.pageWithoutShell(function (S) {
             '<button class="apeek" type="button" id="peek" aria-pressed="' + peek + '"' +
               ' aria-label="' + (peek ? "Skryť heslo" : "Zobraziť heslo") + '">' +
               S.icon(peek ? "visibility_off" : "visibility") + "</button>" +
-            '<button class="ago" type="submit" id="submit" aria-label="Prihlásiť sa"' +
+            /* The arrow is the submit, so the pending state lives on it: the
+               icon and the accessible name both say a request is open, and
+               it is disabled for as long as one is. */
+            '<button class="ago" type="submit" id="submit"' +
+              ' aria-label="' + (busy ? "Prihlasujeme vás…" : "Prihlásiť sa") + '"' +
+              (busy ? ' aria-busy="true"' : "") +
               (ready && !busy ? "" : " disabled") + ">" +
               S.icon(busy ? "hourglass_empty" : "arrow_forward") + "</button>" +
           "</div>" +
@@ -209,80 +198,38 @@ SKYRO.pageWithoutShell(function (S) {
 
       protoHtml() +
       '<div class="ahr"></div>' +
-      '<button class="alink" type="button" id="forgot">Zabudli ste heslo?</button>' +
       helpHtml() +
-      '<p class="afine" id="fine">Prihlasujete sa školským menom a heslom. Heslo nikomu ' +
-        "neposielajte — škola vás oň nikdy nepožiada.</p>";
-  }
-
-  function stepReset() {
-    return '<form id="form" novalidate>' +
-        '<div class="afield' + (error ? " bad" : "") + '">' +
-          '<span class="fl">' +
-            '<span class="fk" id="fk-r">Používateľské meno</span>' +
-            '<input id="username" type="text" autocomplete="username" spellcheck="false"' +
-              ' autocapitalize="none" aria-labelledby="fk-r"' +
-              (error ? ' aria-invalid="true" aria-describedby="err"' : "") +
-              ' placeholder="meno.priezvisko" value="' + S.esc(username) + '">' +
-          "</span>" +
-          '<button class="ago" type="submit" aria-label="Poslať odkaz na zmenu hesla"' +
-            (username.trim() && !busy ? "" : " disabled") + ">" +
-            S.icon(busy ? "hourglass_empty" : "arrow_forward") + "</button>" +
-        "</div>" +
-        errorHtml() +
-      "</form>" +
-      '<div class="ahr"></div>' +
-      '<button class="alink" type="button" id="back">Späť na prihlásenie</button>' +
-      '<p class="afine">Na školskú adresu vám pošleme odkaz, ktorým si nastavíte nové heslo.</p>';
-  }
-
-  function stepSent() {
-    return '<div class="asent">' +
-        '<span class="disc">' + S.icon("mark_email_read") + "</span>" +
-        '<p class="afine" style="max-width:32ch;margin:0">' +
-          (S.api.mock
-            ? "Na školskú adresu bude chodiť odkaz na zmenu hesla. Platí 15 minút."
-            : "Ak k tomuto menu patrí účet, poslali sme naň odkaz na zmenu hesla. Platí 15 minút.") +
-        "</p>" +
-        '<p class="addr">' + S.esc(username.trim()) + "@skyro.ai</p>" +
-        '<div class="ahr"></div>' +
-        '<button class="alink" type="button" id="resend" disabled>' +
-          'Poslať znova <span class="acount">' + RESEND_SECONDS + " s</span></button>" +
-        '<button class="alink" type="button" id="back">Späť na prihlásenie</button>' +
-      "</div>";
+      '<p class="afine" id="fine">Do administrácie sa prihlasuje personál jedálne školským ' +
+        "menom a heslom. Heslo nikomu neposielajte — škola vás oň nikdy nepožiada.</p>";
   }
 
   /* -------------------------------------------------------------- render */
 
   function render(focusSel) {
-    var body = step === "signin" ? stepSignIn() : step === "reset" ? stepReset() : stepSent();
     host.innerHTML =
       '<div class="alogin"></div>' +
       '<div class="awrap"><div class="acol">' +
         S.logoSvg("amark") +
         '<h1 class="atitle">Prihlásenie<br>do administrácie</h1>' +
-        body +
+        formHtml() +
       "</div></div>";
     bind();
+    /* innerHTML threw away whatever had focus; every caller says where the
+       keyboard goes next, or it lands on <body>. */
     if (focusSel) {
       var el = S.$(focusSel);
       if (el) el.focus();
     }
   }
 
-  function goHome() {
-    /* The only place a session is created. Once the API is live the server's
-       user object is stored instead of this stub. */
-    if (!S.session.get()) {
-      S.session.set({ username: username.trim().toLowerCase() });
-    }
+  function goOn() {
     var next = S.session.intended();
     window.location.href = next || HOME;
   }
 
   /* --------------------------------------------------------------- binds */
 
-  function bindSignIn() {
+  function bind() {
     var u = S.$("#username");
     var p = S.$("#password");
 
@@ -321,13 +268,6 @@ SKYRO.pageWithoutShell(function (S) {
       writeRemembered();
     });
 
-    S.$("#forgot").addEventListener("click", function () {
-      error = "";
-      password = "";
-      step = "reset";
-      render("#username");
-    });
-
     S.$("#help").addEventListener("click", function () {
       helpOpen = !helpOpen;
       render("#help");
@@ -335,6 +275,9 @@ SKYRO.pageWithoutShell(function (S) {
 
     S.$("#form").addEventListener("submit", function (ev) {
       ev.preventDefault();
+      /* A second submit while the first request is open is dropped, not
+         queued. The disabled arrow makes that hard; Enter held down on a
+         slow line makes it easy again. */
       if (busy) return;
       username = u.value;
       password = p.value;
@@ -345,6 +288,8 @@ SKYRO.pageWithoutShell(function (S) {
       submitSignIn(username, password).then(function (problem) {
         busy = false;
         if (problem) {
+          /* Nothing on screen moves except the arrow, which becomes
+             pressable again, and the error line the server dictated. */
           error = problem;
           password = ""; // never keep a rejected password around
           render("#password");
@@ -352,73 +297,11 @@ SKYRO.pageWithoutShell(function (S) {
         }
         writeRemembered();
         password = "";
-        goHome();
+        goOn();
       });
     });
 
     if (username && !password) p.focus(); else u.focus();
-  }
-
-  function bindReset() {
-    var ru = S.$("#username");
-
-    ru.addEventListener("input", function () {
-      username = ru.value;
-      var go = S.$(".ago");
-      if (go) go.disabled = busy || !ru.value.trim();
-    });
-
-    S.$("#back").addEventListener("click", function () {
-      stopCooldown();
-      error = "";
-      step = "signin";
-      render("#username");
-    });
-
-    S.$("#form").addEventListener("submit", function (ev) {
-      ev.preventDefault();
-      if (busy) return;
-      username = ru.value;
-
-      busy = true;
-      render();
-
-      submitReset(username).then(function (problem) {
-        busy = false;
-        if (problem) {
-          error = problem;
-          render("#username");
-          return;
-        }
-        error = "";
-        step = "sent";
-        render();
-        startCooldown();
-      });
-    });
-  }
-
-  function bindSent() {
-    S.$("#resend").addEventListener("click", function () {
-      if (cooldown > 0) return;
-      S.$("#resend").disabled = true;
-      startCooldown();
-      submitReset(username);
-      S.announce(S.$("#live"), "Odkaz bol vyžiadaný znova.");
-    });
-
-    S.$("#back").addEventListener("click", function () {
-      stopCooldown();
-      error = "";
-      step = "signin";
-      render("#username");
-    });
-  }
-
-  function bind() {
-    if (step === "signin") return bindSignIn();
-    if (step === "reset") return bindReset();
-    return bindSent();
   }
 
   /* Landing here always ends the current session — the rail's logout link is
