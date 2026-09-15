@@ -7,6 +7,7 @@ window.SKYRO.APP = {
   navLabel: "Navigácia administrátora",
   nav: [
     { href: "index.html",  icon: "monitoring", label: "Prehľad" },
+    { href: "menu.html",   icon: "edit_note",  label: "Menu" },
     { href: "ziaci.html",  icon: "group",      label: "Žiaci" },
     { href: "oznamy.html", icon: "campaign",   label: "Oznamy" }
   ]

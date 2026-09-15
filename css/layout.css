@@ -714,3 +714,29 @@
 .qbtn[disabled]:hover {
   box-shadow: 0 1px 2px rgba(56, 26, 118, 0.05);
 }
+
+/* the allergen picker in the menu editor: many small toggles, wrapping */
+.alg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.alg .qamt {
+  padding: 8px 12px;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+/* Anchors that are styled as controls, not as prose links. The rail already
+   had this; the dashboard shortcuts became <a> when they gained real
+   destinations and picked up the browser's default underline with it. */
+a.qbtn,
+a.btn,
+a.skip,
+a.urow,
+a.conv,
+a.mcard,
+a.orow {
+  text-decoration: none;
+}

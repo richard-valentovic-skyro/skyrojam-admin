@@ -2,10 +2,17 @@
    or off. Those are the only two writes the API has for an account, so they
    are the only two controls on this page.
 
-   THERE IS NO "NEW STUDENT" FORM. The spec has no POST /students: accounts
-   come from the school's system administrator. The old form has been removed
-   rather than left as a button that posts to nothing, and the page header says
-   plainly where an account comes from instead.
+   "NOVÝ ŽIAK" HAS NO ENDPOINT ON THIS BACKEND. There is no POST /students:
+   the manager routes can list an account, activate it and top it up, and
+   nothing opens one. The form stays anyway, because in mock mode it works end
+   to end and the day the route exists it will work against the server with no
+   edit here — and until then a live call gets its 404 turned into a plain
+   Slovak sentence saying account creation is not supported yet. Written up in
+   html/API-GAPS.md (§1).
+
+   A STUDENT IS IDENTIFIED BY NAME AND TRIEDA. Every account carries classCode
+   ("3.A"), so it sits on the row and in the panel: two Nina Bartošovás in a
+   school of four hundred is not a hypothetical.
 
    THERE IS NO LEDGER EITHER. Nothing in the API returns movements, so the
    balance is the whole story — and it is the balance the server sent, never a
@@ -74,6 +81,15 @@ var page = function (S, root) {
   var announceTimer = null;
 
   var sub = null;          // the page-head subtitle, re-read when counts move
+
+  /* The create form takes over the sidebar rather than opening a dialog: it is
+     the same column the selected account uses, and one thing is edited at a
+     time either way. */
+  var creating = false;
+  var nName = "";
+  var nUser = "";
+  var nClass = "";         // the trieda — optional, the server allows none
+  var nUserEdited = false; // once touched, the name stops overwriting it
 
   /* ------------------------------------------------------------ reading */
 
@@ -155,6 +171,9 @@ var page = function (S, root) {
            too, for anyone who never sees the colour. */
         (s.active ? "" : '<span class="sr-only">Neaktívny účet</span>') +
       "</span>" +
+      /* The trieda, in the pill the design keeps for it. An account without
+         one — the server allows null — simply has no pill. */
+      (s.classCode ? '<span class="utr">' + S.esc(s.classCode) + "</span>" : "") +
       '<span class="ubal" style="color:' + balanceColor(s.balanceCents) + '">' +
         S.esc(S.eur(s.balanceCents)) + "</span>" +
     "</button>";
@@ -209,7 +228,46 @@ var page = function (S, root) {
       (noteOk ? "var(--c-green)" : "var(--c-rose)") + '">' + S.esc(note) + "</p>";
   }
 
+  /* A username is the school address without the domain, so it is derived
+     from the name with the diacritics stripped — and stays editable, because
+     two Jána Nováks need different ones. */
+  function createHtml() {
+    var ready = nName.trim() && nUser.trim() && S.looksLikeUsername(nUser);
+    var working = writing("create");
+
+    return '<form class="plain" id="newform" style="display:flex;flex-direction:column;gap:16px">' +
+      '<div class="ph"><span class="pd">Nový účet žiaka</span>' +
+        '<button class="sq" type="button" id="newcancel" aria-label="Zavrieť bez uloženia">' +
+          S.icon("close") + "</button></div>" +
+
+      '<div><label class="flabel" for="n-name">Meno a priezvisko</label>' +
+        '<input class="finput" id="n-name" autocomplete="off" value="' + S.esc(nName) + '"' +
+        ' placeholder="Napríklad Jana Nováková"></div>' +
+
+      '<div><label class="flabel" for="n-user">Používateľské meno</label>' +
+        '<input class="finput" id="n-user" autocomplete="off" spellcheck="false"' +
+        ' autocapitalize="none" value="' + S.esc(nUser) + '" placeholder="meno.priezvisko">' +
+        '<p class="note" style="padding:8px 0 0">Predvyplní sa z mena bez ' +
+          "diakritiky. Týmto menom sa žiak prihlasuje; heslo mu nastaví správca." +
+        "</p></div>" +
+
+      '<div><label class="flabel" for="n-class">Trieda</label>' +
+        '<input class="finput" id="n-class" autocomplete="off" value="' + S.esc(nClass) + '"' +
+        ' placeholder="Napríklad 3.A"></div>' +
+
+      '<button class="btn block" type="submit" id="newsave"' +
+        (ready && !working ? "" : " disabled") + (working ? ' aria-busy="true"' : "") + ">" +
+        S.icon(working ? "progress_activity" : "person_add") +
+        (working ? "Ukladá sa…" : "Vytvoriť účet") + "</button>" +
+
+      noteHtml() +
+      '<p class="note">Nový účet začína s nulovým kreditom. Dobiť ho môžete ' +
+        "hneď po vytvorení.</p>" +
+      "</form>";
+  }
+
   function asideHtml() {
+    if (creating) return createHtml();
     if (!sel) {
       return '<div class="plain dash"><p class="pempty"><b>Vyberte žiaka</b>' +
         "Kliknite na účet v zozname a uvidíte jeho zostatok, kredit a prístup " +
@@ -223,7 +281,10 @@ var page = function (S, root) {
         '<div class="ph"><span class="pd">' + S.esc(s.name) + "</span>" +
           S.chip(s.active ? "ok" : "open", s.active ? "Aktívny" : "Neaktívny") + "</div>" +
 
-        '<div class="ue mb-m">' + S.esc(s.username) + "</div>" +
+        '<div class="row tight mb-m"><span class="ue grow">' +
+          S.esc(s.username) + "</span>" +
+          (s.classCode ? '<span class="utr">' + S.esc(s.classCode) + "</span>" : "") +
+        "</div>" +
 
         '<div class="balbig" style="color:' + balanceColor(s.balanceCents) + '">' +
           S.esc(S.eur(s.balanceCents)) + "</div>" +
@@ -270,11 +331,9 @@ var page = function (S, root) {
   function render() {
     root.innerHTML =
       S.pageHead("Žiaci", subtitle(),
-        /* One quiet line where the "Nový žiak" button used to be. There is no
-           endpoint that creates an account, so this says who does. */
-        '<p class="note" style="max-width:34ch;text-align:right">' +
-          "Nové účty zakladá správca školského systému. Tu sa spravuje kredit " +
-          "a prístup k obedom.</p>") +
+        '<button class="btn" type="button" id="new"' +
+          (creating ? " disabled" : "") + ">" + S.icon("person_add") +
+          "Nový žiak</button>") +
 
       '<div class="split main-aside">' +
         '<div class="stack" id="left">' +
@@ -340,7 +399,126 @@ var page = function (S, root) {
     if (retry) retry.addEventListener("click", function () { runSearch(q); });
   }
 
+  function openCreate() {
+    creating = true;
+    nName = "";
+    nUser = "";
+    nClass = "";
+    nUserEdited = false;
+    note = "";
+    noteOk = true;
+    render();
+    var el = S.$("#n-name", root);
+    if (el) el.focus();
+  }
+
+  function closeCreate(focusSel) {
+    creating = false;
+    note = "";
+    noteOk = true;
+    render();
+    var el = S.$(focusSel || "#new", root);
+    if (el) el.focus();
+  }
+
+  function bindCreate() {
+    var name = S.$("#n-name", root);
+    var user = S.$("#n-user", root);
+    var klass = S.$("#n-class", root);
+    if (!name || !user || !klass) return;
+
+    function sync() {
+      var save = S.$("#newsave", root);
+      if (save) {
+        save.disabled = !(nName.trim() && nUser.trim() && S.looksLikeUsername(nUser)) ||
+          !!writing("create");
+      }
+    }
+
+    name.addEventListener("input", function () {
+      nName = name.value;
+      if (!nUserEdited) {
+        nUser = S.usernameFromName(nName);
+        user.value = nUser;
+      }
+      sync();
+    });
+
+    user.addEventListener("input", function () {
+      nUser = user.value;
+      nUserEdited = true;
+      sync();
+    });
+
+    /* The trieda is optional — it never arms or disarms the button. */
+    klass.addEventListener("input", function () { nClass = klass.value; });
+
+    S.$("#newcancel", root).addEventListener("click", function () { closeCreate(); });
+
+    S.$("#newform", root).addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      createAccount();
+    });
+  }
+
+  function createAccount() {
+    if (writing("create")) return;
+    var payload = {
+      name: nName.trim(),
+      username: nUser.trim().toLowerCase(),
+      classCode: nClass.trim() || null
+    };
+    if (!payload.name || !S.looksLikeUsername(payload.username)) return;
+
+    busy = "create";
+    busyId = "";
+    note = "";
+    render();
+
+    /* THIS ROUTE DOES NOT EXIST ON THIS BACKEND — there is no POST /students.
+       In mock mode the account is created and this page behaves exactly as it
+       will the day the route ships. Against a live server the 404 comes back
+       through the API layer as a plain Slovak sentence saying so, and it lands
+       in the same status line as any other refusal. See html/API-GAPS.md (§1). */
+    S.api.createStudent(payload).then(
+      function (fresh) {
+        busy = "";
+        busyId = "";
+        if (!fresh || !fresh.id) {
+          noteOk = false;
+          note = "Účet sa nepodarilo vytvoriť.";
+          render();
+          return;
+        }
+        /* The server's row, not the one that was typed. */
+        list.unshift(fresh);
+        sel = fresh;
+        creating = false;
+        noteOk = true;
+        note = "Účet pre " + fresh.name + " je vytvorený. Kredit je zatiaľ nulový.";
+        render();
+        /* The panel now shows the new account, so the keyboard lands on the
+           amount field — topping it up is the next thing anyone does. */
+        var el = S.$("#amt", root) || S.$("#new", root);
+        if (el) el.focus();
+        S.announce(S.$("#live"), note);
+      },
+      function (err) {
+        busy = "";
+        busyId = "";
+        noteOk = false;
+        note = (err && err.message) || "Účet sa nepodarilo vytvoriť.";
+        render();
+        var el = S.$("#n-user", root);
+        if (el) el.focus();
+      }
+    );
+  }
+
   function bindAside() {
+    var nw = S.$("#new", root);
+    if (nw) nw.addEventListener("click", openCreate);
+    if (creating) { bindCreate(); return; }
     if (!sel) return;
 
     S.$$("#aside .qamt", root).forEach(function (btn) {

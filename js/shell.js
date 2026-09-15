@@ -9,7 +9,16 @@
    underneath is untouched and still there when the dialog closes.
 
    No balance sits in this topbar. A manager has no lunch account; showing one
-   would be a number about nobody.
+   would be a number about nobody. The name beside it is the account the server
+   authenticated at sign-in, read from the session — never a name typed into a
+   config file.
+
+   The rows in the dialog are GET /students exactly as it answers:
+   { id, name, username, classCode, active, balanceCents }. The trieda is on
+   the row because two students share a name more often than a school likes,
+   and the balance that replaces it after a top-up is the one POST
+   /students/:id/topup sent back — { id, balanceCents } — never a sum worked
+   out here.
 
    What the dialog owes the keyboard: Escape closes it, Tab cannot walk out of
    it, it names itself to a screen reader, and focus goes back to the button
@@ -50,6 +59,13 @@ window.SKYRO = window.SKYRO || {};
       "</div></nav>";
   }
 
+  /* The signed-in manager, or whatever the app was configured to call itself
+     if the session has gone. Identity only: the session holds no money. */
+  function accountName(app) {
+    var who = S.session && S.session.get ? S.session.get() : null;
+    return (who && who.name) || (app && app.account) || "Vedúca jedálne";
+  }
+
   function topbar(app) {
     return '<header class="topbar glass">' +
       '<span class="beta">Beta</span>' +
@@ -60,7 +76,7 @@ window.SKYRO = window.SKYRO || {};
         '<button class="btn soft" type="button" id="topup-open" aria-label="Dobiť kredit">' +
           S.icon("add_card") + '<span class="btl">Dobiť kredit</span></button>' +
         '<div class="who"><span class="av">' + S.icon("person") + "</span>" +
-        '<span class="wn">' + S.esc(app.account) + "</span>" +
+        '<span class="wn">' + S.esc(accountName(app)) + "</span>" +
         S.icon("expand_more", "cv") + "</div>" +
       "</div></header>";
   }
@@ -136,6 +152,13 @@ window.SKYRO = window.SKYRO || {};
 
   function cents() { return S.parseAmountCents(m.amount); }
 
+  /* "Nina Bartošová (3.A)" — the name alone is not always the answer to
+     "which one". */
+  function who(s) {
+    if (!s) return "";
+    return s.classCode ? s.name + " (" + s.classCode + ")" : s.name;
+  }
+
   function studentsWord(n) {
     return n === 1 ? "nájdený žiak" : n >= 2 && n <= 4 ? "nájdení žiaci" : "nájdených žiakov";
   }
@@ -155,6 +178,9 @@ window.SKYRO = window.SKYRO || {};
            Whether money may land on it is the server's answer, not ours. */
         (s.active === false ? '<span class="sr-only">Neaktívny účet</span>' : "") +
       "</span>" +
+      /* The trieda, so the right Nina gets the money. The server allows an
+         account with none, and then there is simply no pill. */
+      (s.classCode ? '<span class="utr">' + S.esc(s.classCode) + "</span>" : "") +
       '<span class="ubal money">' + S.esc(S.eur(s.balanceCents)) + "</span></button>";
   }
 
@@ -203,7 +229,7 @@ window.SKYRO = window.SKYRO || {};
         S.esc(S.eur(S.MAX_TOPUP_CENTS)) + ".</p>";
     }
     var s = selected();
-    return '<p class="note mt-s">' + S.esc(s.name) + " má teraz " +
+    return '<p class="note mt-s">' + S.esc(who(s)) + " má teraz " +
       S.esc(S.eur(s.balanceCents)) + ". Suma sa pripíše po potvrdení.</p>";
   }
 
@@ -343,8 +369,9 @@ window.SKYRO = window.SKYRO || {};
       if (amt) amt.value = "";
 
       m.note = known
-        ? "Pripísané " + S.eur(value) + " · " + rec.name + " má teraz " + S.eur(rec.balanceCents) + "."
-        : "Pripísané " + S.eur(value) + " žiakovi " + rec.name + ".";
+        ? "Pripísané " + S.eur(value) + " · " + who(rec) + " má teraz " +
+          S.eur(rec.balanceCents) + "."
+        : "Pripísané " + S.eur(value) + " žiakovi " + who(rec) + ".";
       m.noteOk = true;
 
       paintList();

@@ -13,8 +13,10 @@
    in place for the same reason — the CSS reads that attribute, so the switch
    animates off the accessible state rather than off a second class.
 
-   "Publikovať oznam" goes through S.api.postAnnouncement, and two rules follow
-   from that:
+   "Publikovať oznam" goes through S.api.postAnnouncement. The server answers
+   201 { id } — the id of what it stored and nothing else, no post to render
+   back — so the confirmation is written from the title that was sent, only
+   after the id came back. Two rules follow from that:
 
    1. NOTHING IS CLEARED UNTIL THE SERVER SAYS SO. The form is emptied inside
       the success handler. A failed publish leaves every character the user
@@ -25,8 +27,8 @@
       successful publish for a form containing nothing but spaces. The check
       happens here, before the request, and says so in the same status line.
 
-   "Uložiť ako koncept" is gone. There is no draft endpoint in the spec, and a
-   button that is permanently disabled is still a button taking up room for
+   "Uložiť ako koncept" is gone. There is no draft endpoint on the backend, and
+   a button that is permanently disabled is still a button taking up room for
    something the product cannot do. "Zahodiť" stays, because it really does
    empty the form it offers to throw away. */
 var page = function (S, root) {
@@ -232,9 +234,10 @@ var page = function (S, root) {
       function (resp) {
         saving = false;
 
-        /* The API answers with the id of what it stored and nothing else, so
-           the sentence names the notice from what was confirmed sent — after
-           the server agreed to it, never before. */
+        /* POST /announcements -> 201 { id }: the id of what it stored and
+           nothing else. There is no post to take back and render, so the
+           sentence names the notice from the title that was sent — after the
+           server agreed to it, never before. */
         if (!resp || !resp.id) {
           status = { ok: false, text: "Server nepotvrdil publikovanie. Skontrolujte stránku Oznamy." };
           render("#publish");

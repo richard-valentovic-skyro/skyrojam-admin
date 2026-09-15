@@ -109,8 +109,15 @@ SKYRO.pageWithoutShell(function (S) {
           });
         }
 
-        /* The account the server authenticated, not the one we typed. */
-        S.session.set(account);
+        /* The account the server authenticated, not the one we typed — and
+           identity only. A balance stored here would be read by the header on
+           every later page and could not be invalidated when it changed. */
+        S.session.set({
+          id: account.id,
+          name: account.name,
+          username: account.username,
+          role: account.role
+        });
         return "";
       },
       function (err) {
