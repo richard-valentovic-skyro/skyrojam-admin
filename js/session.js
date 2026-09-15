@@ -28,7 +28,7 @@ window.SKYRO = window.SKYRO || {};
   /* Pages reachable without a session. Everything else redirects. */
   var PUBLIC = ["prihlasenie.html"];
 
-  /* Cloudflare Pages serves /kredit as well as /kredit.html, so the address
+  /* Cloudflare Pages serves /tyzden as well as /tyzden.html, so the address
      bar may carry either. Normalise to the filename the nav and the guard
      both speak, or the login page guards itself and ?next= is thrown away. */
   function normalise(name) {

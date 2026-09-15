@@ -24,7 +24,7 @@ window.SKYRO = window.SKYRO || {};
   var SAVING = "Ukladá sa…";
   var DEBOUNCE_MS = 250;
 
-  /* /kredit and /kredit.html are the same page; the nav speaks filenames. */
+  /* /tyzden and /tyzden.html are the same page; the nav speaks filenames. */
   function currentFile() {
     var f = window.location.pathname.split("/").pop();
     if (!f) return "index.html";

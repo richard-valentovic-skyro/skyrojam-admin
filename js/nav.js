@@ -1,15 +1,13 @@
-/* What this app is: its nav, who is signed in, where the logo points.
-   The student app has its own copy of this file with its own config. */
+/* What this app is: its nav and who is signed in.
+   The student app has its own copy with its own config. */
 window.SKYRO = window.SKYRO || {};
 window.SKYRO.APP = {
   home: "index.html",
-  account: "Katarína Vrábľová",
+  account: "",
   navLabel: "Navigácia administrátora",
   nav: [
-    { href: "index.html",     icon: "monitoring", label: "Prehľad" },
-    { href: "menu.html",      icon: "edit_note",  label: "Menu" },
-    { href: "oznamy.html",    icon: "campaign",   label: "Oznamy" },
-    { href: "ziaci.html",     icon: "group",      label: "Žiaci" },
-    { href: "schranka.html",  icon: "inbox",      label: "Schránka", badge: 6 }
+    { href: "index.html",  icon: "monitoring", label: "Prehľad" },
+    { href: "ziaci.html",  icon: "group",      label: "Žiaci" },
+    { href: "oznamy.html", icon: "campaign",   label: "Oznamy" }
   ]
 };
